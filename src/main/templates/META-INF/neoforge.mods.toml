@@ -46,7 +46,7 @@ displayName="${mod_name}" #mandatory
 
 # The description text for the mod (multi line!) (#mandatory)
 description='''
-Example mod description.
+Adds a simple Flight computer you can program with python.
 '''
 
 # The [[mixins]] block allows you to declare your mixin config to FML so that it gets loaded.
@@ -93,3 +93,9 @@ Example mod description.
 # stop your mod loading on the server for example.
 #[features.${mod_id}]
 #openGLVersion="[3.2,)"
+[[dependencies.${mod_id}]]
+modId="create"
+mandatory=true
+versionRange="[6.0.10,)"
+ordering="AFTER"
+side="BOTH"

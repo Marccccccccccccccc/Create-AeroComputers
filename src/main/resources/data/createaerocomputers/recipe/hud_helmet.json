@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    {
+      "item": "minecraft:iron_helmet"
+    },
+    {
+      "item": "createaerocomputers:hud_display"
+    }
+  ],
+  "result": {
+    "count": 1,
+    "id": "createaerocomputers:hud_helmet"
+  }
+}

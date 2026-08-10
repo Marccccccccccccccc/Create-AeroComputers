@@ -121,6 +121,31 @@ public class CodeEditorWidget extends AbstractWidget {
     private enum AutocompleteMode { NORMAL, METHOD, PARAM }
     private AutocompleteMode autocompleteMode = AutocompleteMode.NORMAL;
 
+    private static final Map<String, List<String>> BUILTIN_FUNCTION_PARAMS = Map.ofEntries(
+            Map.entry("print", List.of("text")),
+            Map.entry("sqrt", List.of("value")),
+            Map.entry("sin", List.of("degrees")),
+            Map.entry("cos", List.of("degrees")),
+            Map.entry("asin", List.of("value")),
+            Map.entry("acos", List.of("value")),
+            Map.entry("abs", List.of("value")),
+            Map.entry("round", List.of("value")),
+            Map.entry("ceil", List.of("value")),
+            Map.entry("floor", List.of("value")),
+            Map.entry("min", List.of("a", "b")),
+            Map.entry("max", List.of("a", "b")),
+            Map.entry("getPos", List.of()),
+            Map.entry("getRot", List.of()),
+            Map.entry("getVel", List.of())
+    );
+
+    private static final Map<String, List<String>> BUILTIN_CLASS_PARAMS = Map.of(
+            "Label", List.of("x", "y", "text", "color", "font_size"),
+            "Line", List.of("x1", "y1", "x2", "y2", "width", "color"),
+            "Rect", List.of("x", "y", "width", "height", "border_width", "center_color", "border_color", "render_center", "render_border"),
+            "Poly", List.of("xs", "ys", "width", "color")
+    );
+
     public CodeEditorWidget(int x, int y, int width, int height, String text,
                             BoardComputerBlockEntity.EditorCompletions completions) {
         super(x, y, width, height, Component.empty());
@@ -402,6 +427,8 @@ public class CodeEditorWidget extends AbstractWidget {
             cursorLine = pos[0];
             cursorColumn = pos[1];
 
+            ensureCursorVisible();
+
             isDragging = true;
 
             return true;
@@ -517,6 +544,7 @@ public class CodeEditorWidget extends AbstractWidget {
         insertText(String.valueOf(c));
 
         maybeAutoOutdent();
+        updateAutocomplete();
 
         return true;
     }
@@ -1837,6 +1865,8 @@ public class CodeEditorWidget extends AbstractWidget {
         Set<String> localClasses = new LinkedHashSet<>(serverClasses);
         Map<String, List<String>> localClassMethods = new LinkedHashMap<>(serverClassMethods);
         Map<String, List<String>> localCallableParams = new LinkedHashMap<>(serverCallableParams);
+        localCallableParams.putAll(BUILTIN_FUNCTION_PARAMS);
+        localCallableParams.putAll(BUILTIN_CLASS_PARAMS);
 
         String currentClass = null;
 

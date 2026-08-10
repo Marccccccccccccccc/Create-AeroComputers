@@ -187,12 +187,6 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
                             menu.blockEntity.getBlockPos(), BoardComputerVariablePayload.Action.RENAME, name, newName));
                 }
             });
-
-            EditBox valueBox = track(new EditBox(font, leftPos + PANEL_X + 75, topPos + y, 50, 14, Component.empty()));
-            valueBox.setValue(String.valueOf(entry.getValue()));
-            valueBox.setResponder(newVal -> PacketDistributor.sendToServer(new BoardComputerVariablePayload(
-                    menu.blockEntity.getBlockPos(), BoardComputerVariablePayload.Action.SET_VALUE, name, newVal)));
-
             track(Button.builder(Component.literal("X"), btn -> {
                 PacketDistributor.sendToServer(new BoardComputerVariablePayload(
                         menu.blockEntity.getBlockPos(), BoardComputerVariablePayload.Action.REMOVE, name, ""));

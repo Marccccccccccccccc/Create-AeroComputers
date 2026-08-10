@@ -17,6 +17,7 @@ import net.tui.aerocomputers.client.ClientHudRegistry;
 import net.tui.aerocomputers.network.BoardComputerChannelPayload;
 import org.joml.Matrix4f;
 
+import java.awt.*;
 import java.util.List;
 
 public class HudDisplayRenderer implements BlockEntityRenderer<HudDisplayBlockEntity> {
@@ -235,7 +236,7 @@ public class HudDisplayRenderer implements BlockEntityRenderer<HudDisplayBlockEn
                 1.0f
         );
 
-        int color = argb(e.color());
+        int color = fromRGBA(e.color().get(0), e.color().get(1), e.color().get(2), 255);
 
         font.drawInBatch(
                 e.text(),
@@ -529,5 +530,9 @@ public class HudDisplayRenderer implements BlockEntityRenderer<HudDisplayBlockEn
                 (float) y4,
                 0
         ).setColor(r, g, b, a);
+    }
+
+    public static int fromRGBA(int r, int g, int b, int a) {
+        return (r << 16) + (g << 8) + b + (a << 24);
     }
 }

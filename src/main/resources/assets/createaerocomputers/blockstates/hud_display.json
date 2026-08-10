@@ -1,0 +1,19 @@
+{
+  "variants": {
+    "facing=north": {
+      "model": "createaerocomputers:block/hud_display"
+    },
+    "facing=south": {
+      "model": "createaerocomputers:block/hud_display",
+      "y": 180
+    },
+    "facing=east": {
+      "model": "createaerocomputers:block/hud_display",
+      "y": 90
+    },
+    "facing=west": {
+      "model": "createaerocomputers:block/hud_display",
+      "y": 270
+    }
+  }
+}

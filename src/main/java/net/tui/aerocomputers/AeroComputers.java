@@ -1,5 +1,11 @@
 package net.tui.aerocomputers;
 
+import net.tui.aerocomputers.block.ModBlocks;
+import net.tui.aerocomputers.block.entity.ModBlockEntitys;
+import net.tui.aerocomputers.item.ModCreativeModeTabs;
+import net.tui.aerocomputers.item.ModItems;
+import net.tui.aerocomputers.network.ModNetworking;
+import net.tui.aerocomputers.screen.ModMenuTypes;
 import org.slf4j.Logger;
 
 import com.mojang.logging.LogUtils;
@@ -24,6 +30,14 @@ public class AeroComputers {
         modEventBus.addListener(this::commonSetup);
 
         NeoForge.EVENT_BUS.register(this);
+
+        ModItems.register(modEventBus);
+        ModBlocks.register(modEventBus);
+        ModCreativeModeTabs.register(modEventBus);
+        ModBlockEntitys.register(modEventBus);
+        ModMenuTypes.register(modEventBus);
+
+        modEventBus.addListener(ModNetworking::register);
 
         // Register the item to a creative tab
         modEventBus.addListener(this::addCreative);

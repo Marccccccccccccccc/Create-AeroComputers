@@ -1,0 +1,33 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "A": {
+      "item": "create:redstone_link"
+    },
+    "B": {
+      "item": "create:brass_casing"
+    },
+    "C": {
+      "item": "simulated:gimbal_sensor"
+    },
+    "D": {
+      "item": "create:shaft"
+    },
+    "E": {
+      "item": "create:display_link"
+    },
+    "F": {
+      "item": "minecraft:glass"
+    }
+  },
+  "pattern": [
+    "FEF",
+    "ACA",
+    "BDB"
+  ],
+  "result": {
+    "count": 1,
+    "id": "createaerocomputers:board_computer"
+  }
+}

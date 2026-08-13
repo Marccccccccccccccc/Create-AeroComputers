@@ -6,6 +6,7 @@ import com.simibubi.create.content.kinetics.base.IRotate;
 import com.simibubi.create.content.kinetics.base.ShaftRenderer;
 import com.simibubi.create.content.kinetics.base.ShaftVisual;
 import com.simibubi.create.content.kinetics.simpleRelays.ShaftBlock;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
@@ -13,6 +14,9 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelReader;
@@ -26,6 +30,8 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.tui.aerocomputers.block.entity.BoardComputerBlockEntity;
 import net.tui.aerocomputers.block.entity.ModBlockEntitys;
 import org.jetbrains.annotations.Nullable;
+
+import java.util.List;
 
 public class BoardComputerBlock extends DirectionalKineticBlock implements EntityBlock {
     public static final MapCodec<BoardComputerBlock> CODEC = simpleCodec(BoardComputerBlock::new);
@@ -92,4 +98,13 @@ public class BoardComputerBlock extends DirectionalKineticBlock implements Entit
         return this.defaultBlockState().setValue(DirectionalKineticBlock.FACING, context.getHorizontalDirection().getOpposite());
     }
 
+    @Override
+    public void appendHoverText(ItemStack stack, Item.TooltipContext context, List<Component> tooltipComponents, TooltipFlag tooltipFlag) {
+        if(Screen.hasShiftDown()) {
+            tooltipComponents.add(Component.translatable("tooltip.createaerocomputers.board_computer_shift"));
+        } else {
+            tooltipComponents.add(Component.translatable("tooltip.createaerocomputers.pressshift"));
+        }
+        super.appendHoverText(stack, context, tooltipComponents, tooltipFlag);
+    }
 }

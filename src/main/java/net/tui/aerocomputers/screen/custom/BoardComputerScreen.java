@@ -1,6 +1,7 @@
 package net.tui.aerocomputers.screen.custom;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
@@ -18,8 +19,19 @@ import net.tui.aerocomputers.network.BoardComputerControlPayload;
 import net.tui.aerocomputers.network.BoardComputerEditPayload;
 import net.tui.aerocomputers.network.BoardComputerVariablePayload;
 import net.tui.aerocomputers.screen.CodeEditorWidget;
+import net.tui.aerocomputers.screen.HelpWidget;
 import net.tui.aerocomputers.screen.ItemIconButton;
+import org.lwjgl.PointerBuffer;
+import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
+import org.lwjgl.util.tinyfd.TinyFileDialogs;
 
+import javax.swing.*;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -53,6 +65,8 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
     private EditBox boardNameBox;
 
     private int lastEditorCompletionUpdateId = -1;
+
+    private HelpWidget helpWidget;
 
     public BoardComputerScreen(BoardComputerMenu menu, Inventory playerInventory, Component title) {
         super(menu, playerInventory, title);
@@ -117,7 +131,7 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
                     ));
                     btn.setMessage(Component.literal(newState ? "Running!" : "Paused!"));
                 }
-        ).bounds(leftPos + 10, buttonY, 50, 20).build());
+        ).bounds(leftPos + 8, buttonY, 48, 20).build());
 
         addRenderableWidget(Button.builder(
                 Component.literal("Restart"),
@@ -126,24 +140,82 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
                         BoardComputerControlPayload.Action.RESTART,
                         ""
                 ))
-        ).bounds(leftPos + 65, buttonY, 60, 20).build());
+        ).bounds(leftPos + 58, buttonY, 50, 20).build());
 
-        int tabX = leftPos + 8;
-        int tabY = topPos + 20;
+        addRenderableWidget(
+                Button.builder(
+                        Component.literal("?"),
+                        btn -> {
+                            if (helpWidget == null) {
+                                helpWidget = new HelpWidget(
+                                        (width - 300) / 2,
+                                        (height - 180) / 2,
+                                        300,
+                                        180,
+                                        menu.blockEntity.getEditorCompletions()
+                                );
 
-        tabMemoryButton = addRenderableWidget(Button.builder(
-                Component.literal("Memory"), btn -> switchTab(Tab.MEMORY)
-        ).bounds(tabX, tabY, 55, 20).build());
+                                addRenderableWidget(helpWidget);
+                            }
+                        }
+                ).bounds(leftPos + 110, buttonY, 20, 20).build()
+        );
 
-        tabInputButton = addRenderableWidget(Button.builder(
-                Component.literal("RL In"), btn -> switchTab(Tab.RL_INPUT)
-        ).bounds(tabX + 57, tabY, 55, 20).build());
+        addRenderableWidget(Button.builder(Component.literal("\uD83D\uDCBE"),btn -> {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                PointerBuffer filters = stack.mallocPointer(1);
+                filters.put(MemoryUtil.memAddress(stack.UTF8("*.txt")));
+                filters.flip();
+                String filePath = TinyFileDialogs.tinyfd_saveFileDialog(
+                        "Save My Data",
+                        "mydata.txt",
+                        filters,
+                        "Text files" );
+                if (filePath == null) { return; }
+                try { Files.writeString( Paths.get(filePath), "Hello! This is my custom data." );
+                    System.out.println("Saved to: " + filePath); }
+                catch (IOException e) { e.printStackTrace();}}}
+        ).bounds(leftPos + 132, buttonY, 20, 20).build());
 
-        tabOutputButton = addRenderableWidget(Button.builder(
-                Component.literal("RL Out"), btn -> switchTab(Tab.RL_OUTPUT)
-        ).bounds(tabX + 114, tabY, 55, 20).build());
+        addRenderableWidget(Button.builder(Component.literal("\uD83D\uDCC1"),btn -> {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                PointerBuffer filters = stack.mallocPointer(1);
+                filters.put(MemoryUtil.memAddress(stack.UTF8("*.txt")));
+                filters.flip();
+                String filePath = TinyFileDialogs.tinyfd_openFileDialog(
+                        "Load My Data",
+                        "",
+                        filters,
+                        "Text files",
+                        false );
+                if (filePath == null) { return; }
+                try { String data = Files.readString( Paths.get(filePath) );
+                    System.out.println("Loaded: " + data);
+                    loadData(data); }
+                catch (IOException e) { e.printStackTrace(); } } }
+        ).bounds(leftPos + 154, buttonY, 20, 20).build() );
 
-        switchTab(Tab.MEMORY);
+
+    int tabX = leftPos + 8;
+                int tabY = topPos + 20;
+
+                tabMemoryButton = addRenderableWidget(Button.builder(
+                        Component.literal("Memory"), btn -> switchTab(Tab.MEMORY)
+                ).bounds(tabX, tabY, 55, 20).build());
+
+                tabInputButton = addRenderableWidget(Button.builder(
+                        Component.literal("RL In"), btn -> switchTab(Tab.RL_INPUT)
+                ).bounds(tabX + 57, tabY, 55, 20).build());
+
+                tabOutputButton = addRenderableWidget(Button.builder(
+                        Component.literal("RL Out"), btn -> switchTab(Tab.RL_OUTPUT)
+                ).bounds(tabX + 114, tabY, 55, 20).build());
+
+                switchTab(Tab.MEMORY);
+            }
+
+    public void loadData(String data) {
+        AeroComputers.LOGGER.info(data);
     }
 
     private void switchTab(Tab tab) {
@@ -357,6 +429,12 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (helpWidget != null && helpWidget.visible) {
+            if (helpWidget.mouseClicked(mouseX, mouseY, button)) {
+                return true;
+            }
+        }
+
         boolean result = super.mouseClicked(mouseX, mouseY, button);
 
         if (isInPanel(mouseX, mouseY)) {
@@ -383,6 +461,12 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
         if (keyCode == 256 && editor != null && editor.isAutocompleteOpen()) {
             editor.closeAutocomplete();
             return true; // consumed — don't let Screen's default Escape-closes-GUI logic run
+        }
+
+        if (keyCode == 256 && helpWidget != null) {
+            removeWidget(helpWidget);
+            helpWidget = null;
+            return true;
         }
 
         for (var widget : panelWidgets) {
@@ -464,13 +548,18 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
     }
 
     @Override
-    public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    public void render(
+            GuiGraphics graphics,
+            int mouseX,
+            int mouseY,
+            float partialTick
+    ) {
         renderBackground(graphics, mouseX, mouseY, partialTick);
 
-        // Draw GUI background
+        // Draw GUI and all normal widgets
         super.render(graphics, mouseX, mouseY, partialTick);
 
-        // Clip to panel
+        // Clip panel
         graphics.enableScissor(
                 leftPos + PANEL_X,
                 topPos + PANEL_Y,
@@ -478,12 +567,18 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
                 topPos + PANEL_Y + PANEL_HEIGHT
         );
 
-        // Draw only panel widgets
+        // Panel widgets are rendered again here
         for (var widget : panelWidgets) {
             widget.render(graphics, mouseX, mouseY, partialTick);
         }
 
         graphics.disableScissor();
+
+        // IMPORTANT:
+        // Render the help popup LAST so it is visually on top
+        if (helpWidget != null && helpWidget.visible) {
+            helpWidget.render(graphics, mouseX, mouseY, partialTick);
+        }
 
         renderTooltip(graphics, mouseX, mouseY);
     }

@@ -147,6 +147,31 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         return editorCompletionUpdateId;
     }
 
+    private static final Map<String, List<String>> BUILTIN_FUNCTION_PARAMS = Map.ofEntries(
+            Map.entry("print", List.of("text")),
+            Map.entry("sqrt", List.of("value")),
+            Map.entry("sin", List.of("degrees")),
+            Map.entry("cos", List.of("degrees")),
+            Map.entry("asin", List.of("value")),
+            Map.entry("acos", List.of("value")),
+            Map.entry("abs", List.of("value")),
+            Map.entry("round", List.of("value")),
+            Map.entry("ceil", List.of("value")),
+            Map.entry("floor", List.of("value")),
+            Map.entry("min", List.of("a", "b")),
+            Map.entry("max", List.of("a", "b")),
+            Map.entry("getPos", List.of()),
+            Map.entry("getRot", List.of()),
+            Map.entry("getVel", List.of())
+    );
+
+    private static final Map<String, List<String>> BUILTIN_CLASS_PARAMS = Map.of(
+            "Label", List.of("x", "y", "text", "color", "font_size"),
+            "Line", List.of("x1", "y1", "x2", "y2", "width", "color"),
+            "Rect", List.of("x", "y", "w", "h", "border_width", "center_color", "border_color", "render_center", "render_border"),
+            "Poly", List.of("xs", "ys", "border_width", "center_color", "border_color", "render_center", "render_border")
+    );
+
     public BoardComputerBlockEntity(BlockPos pos, BlockState blockState) {
         super(ModBlockEntitys.BOARDCOMPUTER_BE.get(), pos, blockState);
         setLazyTickRate(10);
@@ -631,7 +656,8 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
     private Object callFunction(String name, CallArgs callArgs) {
         if (builtins.containsKey(name)) {
-            return builtins.get(name).apply(callArgs.positional);
+            List<String> paramNames = BUILTIN_FUNCTION_PARAMS.getOrDefault(name, List.of());
+            return builtins.get(name).apply(resolveArgs(paramNames, callArgs));
         }
 
         FunctionDef def = functions.get(name);
@@ -1083,7 +1109,29 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         }
         printsThisTick++;
 
-        Object result = evaluateExpression(extractBrackets(line));
+        String argsStr = extractBrackets(line);
+
+        List<String> savedToks = toks;
+        int savedPos = pos;
+
+        toks = tokenize(argsStr);
+        pos = 0;
+
+        CallArgs callArgs = new CallArgs();
+        if (!peek().isEmpty()) {
+            parseOneArg(callArgs);
+            while (peek().equals(",")) {
+                next();
+                parseOneArg(callArgs);
+            }
+        }
+
+        toks = savedToks;
+        pos = savedPos;
+
+        List<Object> resolved = resolveArgs(BUILTIN_FUNCTION_PARAMS.getOrDefault("print", List.of("text")), callArgs);
+        Object result = resolved.isEmpty() ? "" : resolved.get(0);
+
         String message = stringify(result);
         for (Player player : level.players()) {
             player.sendSystemMessage(Component.literal(message));
@@ -1376,7 +1424,8 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
             CallArgs callArgs = parseCallArgs();
 
             if (nativeClasses.containsKey(tok)) {
-                return nativeClasses.get(tok).create(callArgs.positional);
+                List<String> paramNames = BUILTIN_CLASS_PARAMS.getOrDefault(tok, List.of());
+                return nativeClasses.get(tok).create(resolveArgs(paramNames, callArgs));
             }
             if (classes.containsKey(tok)) {
                 return instantiate(tok, callArgs);
@@ -2072,17 +2121,22 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
     }
 
     private void parseOneArg(CallArgs result) {
-        String maybeName = peek();
-        if (maybeName.matches("^[A-Za-z_][A-Za-z0-9_]*$")) {
-            String lookahead = (pos + 1) < toks.size() ? toks.get(pos + 1) : "";
-            if (lookahead.equals("=")) {
-                next(); // consume name
-                next(); // consume '='
-                result.named.put(maybeName, parseComparison());
-                return;
-            }
+        String name = peek();
+
+        // named argument: name = expression
+        if (name.matches("^[A-Za-z_][A-Za-z0-9_]*$")
+                && pos + 1 < toks.size()
+                && toks.get(pos + 1).equals("=")) {
+
+            next(); // name
+            next(); // =
+
+            result.named.put(name, parseOr());
+            return;
         }
-        result.positional.add(parseComparison());
+
+        // positional argument
+        result.positional.add(parseOr());
     }
 
     private void bindParams(List<ParamDef> params, int skipFirst, CallArgs callArgs, Map<String, Object> frame) {
@@ -2167,6 +2221,16 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                         .toList();
                 callableParams.put(methodEntry.getKey(), paramNames);
             }
+
+            // register constructor params under the class name too, so "ClassName(" shows __init__'s args
+            FunctionDef initDef = entry.getValue().methods.get("__init__");
+            if (initDef != null) {
+                List<String> initParams = initDef.params().stream()
+                        .map(ParamDef::name)
+                        .filter(n -> !n.equals("self"))
+                        .toList();
+                callableParams.put(entry.getKey(), initParams);
+            }
         }
 
         for (var entry : functions.entrySet()) {
@@ -2207,4 +2271,28 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
             Map<String, List<String>> classMethods,      // class name -> method names
             Map<String, List<String>> callableParams     // function/method name -> param names
     ) {}
+
+
+
+    private List<Object> resolveArgs(List<String> paramNames, CallArgs callArgs) {
+        if (callArgs.named.isEmpty()) {
+            return callArgs.positional; // fast path, no named args used
+        }
+
+        List<Object> result = new ArrayList<>();
+        int posIndex = 0;
+
+        for (String paramName : paramNames) {
+            if (callArgs.named.containsKey(paramName)) {
+                result.add(callArgs.named.get(paramName));
+            } else if (posIndex < callArgs.positional.size()) {
+                result.add(callArgs.positional.get(posIndex));
+                posIndex++;
+            } else {
+                break; // no more positional values and no named override — stop, let the callee's own arg.size() checks handle missing trailing args
+            }
+        }
+
+        return result;
+    }
 }

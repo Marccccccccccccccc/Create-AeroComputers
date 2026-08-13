@@ -146,6 +146,16 @@ public class CodeEditorWidget extends AbstractWidget {
             "Poly", List.of("xs", "ys", "width", "color")
     );
 
+    private boolean readOnly = false;
+
+    public void setReadOnly(boolean readOnly) {
+        this.readOnly = readOnly;
+    }
+
+    public boolean isReadOnly() {
+        return readOnly;
+    }
+
     public CodeEditorWidget(int x, int y, int width, int height, String text,
                             BoardComputerBlockEntity.EditorCompletions completions) {
         super(x, y, width, height, Component.empty());
@@ -493,6 +503,9 @@ public class CodeEditorWidget extends AbstractWidget {
 
     @Override
     public boolean charTyped(char c, int modifiers) {
+        if (readOnly) {
+            return false;
+        }
 
         if (!isFocused()) {
             return false;
@@ -552,6 +565,9 @@ public class CodeEditorWidget extends AbstractWidget {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (readOnly) {
+            return false;
+        }
 
         if (!isFocused()) {
             return false;
@@ -1590,17 +1606,19 @@ public class CodeEditorWidget extends AbstractWidget {
         String line = lines.get(cursorLine);
         int col = Math.min(cursorColumn, line.length());
 
-        // Context 1: right after "something." — suggest all known method names
-        int dotBefore = findDotBeforeWord(line, col);
+        boolean isDeclarationLine = line.trim().startsWith("class ") || line.trim().startsWith("def ");
+
         // Context 1: dot-access
-        if (dotBefore != -1) {
+        int dotBefore = findDotBeforeWord(line, col);
+        if (dotBefore != -1 && !isDeclarationLine) {
             autocompleteMode = AutocompleteMode.METHOD;
             showMethodCompletions(line, col, dotBefore);
             return;
         }
 
-        // Context 2: inside call parens
-        String enclosingCall = findEnclosingCallName(line, col);
+        // Context 2: inside call parens — also skip for declaration lines,
+        // since "(" in "def name(" is a parameter list, not a call
+        String enclosingCall = isDeclarationLine ? null : findEnclosingCallName(line, col);
         if (enclosingCall != null && callableParams.containsKey(enclosingCall)) {
             autocompleteMode = AutocompleteMode.PARAM;
             showParamCompletions(enclosingCall, line, col);
@@ -1621,11 +1639,13 @@ public class CodeEditorWidget extends AbstractWidget {
 
         String lowerPrefix = prefix.toLowerCase();
 
-        addMatching(BUILTIN_FUNCTIONS.stream().toList(), lowerPrefix);
-        addMatching(functions, lowerPrefix);
-        addMatching(classes, lowerPrefix);
+        if (!isDeclarationLine) {
+            addMatching(BUILTIN_FUNCTIONS.stream().toList(), lowerPrefix);
+            addMatching(functions, lowerPrefix);
+            addMatching(classes, lowerPrefix);
+            addMatching(nativeClasses, lowerPrefix);
+        }
         addMatching(variables, lowerPrefix);
-        addMatching(nativeClasses, lowerPrefix);
         addMatching(CONTROL_KEYWORDS.stream().toList(), lowerPrefix);
         addMatching(DECLARATION_KEYWORDS.stream().toList(), lowerPrefix);
 
@@ -1638,7 +1658,6 @@ public class CodeEditorWidget extends AbstractWidget {
             autocompleteSuggestions.subList(AUTOCOMPLETE_MAX_RESULTS, autocompleteSuggestions.size()).clear();
         }
 
-        autocompleteOpen = true;
         autocompleteMode = AutocompleteMode.NORMAL;
         autocompleteOpen = true;
     }
@@ -1670,18 +1689,15 @@ public class CodeEditorWidget extends AbstractWidget {
         end = Math.max(start, Math.min(end, line.length()));
 
         String currentWord = line.substring(start, end);
-
-        // If the user already typed the full suggestion, don't re-insert the base word —
-        // just close the popup (still allow "=" / "()" appending logic below to run once).
         boolean alreadyFullyTyped = currentWord.equals(suggestion);
 
-        String insertion = alreadyFullyTyped ? "" : suggestion;
+        String suffix = "";
         int cursorOffsetFromEnd = 0;
 
         if (autocompleteMode == AutocompleteMode.PARAM) {
             boolean alreadyHasEquals = end < line.length() && line.charAt(end) == '=';
             if (!alreadyHasEquals) {
-                insertion = insertion + "=";
+                suffix = "=";
             }
         } else if (autocompleteMode == AutocompleteMode.METHOD
                 || (autocompleteMode == AutocompleteMode.NORMAL
@@ -1690,13 +1706,16 @@ public class CodeEditorWidget extends AbstractWidget {
 
             boolean alreadyHasParens = end < line.length() && line.charAt(end) == '(';
             if (!alreadyHasParens) {
-                insertion = insertion + "()";
+                suffix = "()";
                 cursorOffsetFromEnd = 1;
             }
         }
 
-        if (insertion.isEmpty()) {
-            // nothing to insert and nothing to append — just close the popup
+        String replacement = alreadyFullyTyped ? currentWord : suggestion;
+        String insertion = replacement + suffix;
+
+        if (alreadyFullyTyped && suffix.isEmpty()) {
+            // nothing to change at all — just close the popup
             autocompleteOpen = false;
             autocompleteSuggestions.clear();
             return;
@@ -1707,7 +1726,7 @@ public class CodeEditorWidget extends AbstractWidget {
                 line.substring(0, start) + insertion + line.substring(end)
         );
 
-        cursorColumn = start + (alreadyFullyTyped ? end - start : 0) + insertion.length() - cursorOffsetFromEnd;
+        cursorColumn = start + insertion.length() - cursorOffsetFromEnd;
 
         autocompleteOpen = false;
         autocompleteSuggestions.clear();
@@ -1903,10 +1922,14 @@ public class CodeEditorWidget extends AbstractWidget {
                     if (!name.isEmpty()) {
                         if (currentClass != null) {
                             localClassMethods.computeIfAbsent(currentClass, k -> new ArrayList<>()).add(name);
+                            if (name.equals("__init__")) {
+                                localCallableParams.put(currentClass, params); // constructor args, keyed by class name
+                            }
                         } else {
                             localFunctions.add(name);
                         }
                         localCallableParams.put(name, params);
+                        localVars.addAll(params); // see fix #3 below
                     }
                 }
                 continue;

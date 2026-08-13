@@ -2,5 +2,14 @@
   "item.createaerocomputers.hud_helmet": "HUD Helmet",
   "block.createaerocomputers.board_computer": "Board Computer",
   "block.createaerocomputers.hud_display": "HUD Display",
-  "creativetab.createaerocomputers.aerocomputers_tab": "AeroComputers"
+  "creativetab.createaerocomputers.aerocomputers_tab": "AeroComputers",
+
+  "tooltip.createaerocomputers.pressshift": "Press §eShift§r for more Information",
+
+  "tooltip.createaerocomputers.hud_helmet": "Linked Computer:",
+  "tooltip.createaerocomputers.hud_helmet_shift": "Equip to see the rendered hud the linked Board Computer generates.",
+
+  "tooltip.createaerocomputers.hud_display_shift": "Click it to set the linked Board Computer. When set it will render the hud the linked Board Computer generates",
+
+  "tooltip.createaerocomputers.board_computer_shift": "This Computer can be programmt with a language similar to Python, you can read Contraption telemetry data, you can create custom Heads up displays(HUD), you can connect to redstone links to control your aircraft, or if you want more destruction you can link the Create Arms mod for weapon support. If you need help with programming just click the Question Mark Button or Control-Click a word. You will also get feedback if your Syntax is wrong"
 }

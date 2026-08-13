@@ -2,6 +2,7 @@ package net.tui.aerocomputers.block.custom;
 
 import com.mojang.serialization.MapCodec;
 import com.simibubi.create.content.kinetics.base.DirectionalKineticBlock;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
@@ -11,6 +12,9 @@ import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.ContainerLevelAccess;
 import net.minecraft.world.inventory.CraftingMenu;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
@@ -25,6 +29,8 @@ import net.tui.aerocomputers.AeroComputers;
 import net.tui.aerocomputers.block.entity.BoardComputerBlockEntity;
 import net.tui.aerocomputers.block.entity.HudDisplayBlockEntity;
 import org.jetbrains.annotations.Nullable;
+
+import java.util.List;
 
 public class HudDisplayBlock extends HorizontalDirectionalBlock implements EntityBlock {
     public static final MapCodec<HudDisplayBlock> CODEC = simpleCodec(HudDisplayBlock::new);
@@ -78,5 +84,15 @@ public class HudDisplayBlock extends HorizontalDirectionalBlock implements Entit
                 AeroComputers.LOGGER.info("open Hud Display");
             }
         return InteractionResult.SUCCESS;
+    }
+
+    @Override
+    public void appendHoverText(ItemStack stack, Item.TooltipContext context, List<Component> tooltipComponents, TooltipFlag tooltipFlag) {
+        if(Screen.hasShiftDown()) {
+            tooltipComponents.add(Component.translatable("tooltip.createaerocomputers.hud_display_shift"));
+        } else {
+            tooltipComponents.add(Component.translatable("tooltip.createaerocomputers.pressshift"));
+        }
+        super.appendHoverText(stack, context, tooltipComponents, tooltipFlag);
     }
 }

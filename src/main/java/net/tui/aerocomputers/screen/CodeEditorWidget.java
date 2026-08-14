@@ -9,6 +9,7 @@ import net.tui.aerocomputers.AeroComputers;
 import net.tui.aerocomputers.block.entity.BoardComputerBlockEntity;
 
 import java.util.*;
+import java.util.function.Consumer;
 
 import static net.minecraft.client.gui.screens.Screen.hasControlDown;
 import static net.minecraft.client.gui.screens.Screen.hasShiftDown;
@@ -146,7 +147,31 @@ public class CodeEditorWidget extends AbstractWidget {
             "Poly", List.of("xs", "ys", "width", "color")
     );
 
+    public static final Map<String, String> HELP_LOOKUP = Map.ofEntries(
+            Map.entry("if", "help.aero.if.text"),
+            Map.entry("while", "help.aero.while.text"),
+            Map.entry("for", "help.aero.for.text"),
+            Map.entry("def", "help.aero.def.text"),
+            Map.entry("class", "help.aero.class.text"),
+            Map.entry("Label", "help.aero.label.text"),
+            Map.entry("Line", "help.aero.line.text"),
+            Map.entry("Rect", "help.aero.rect.text"),
+            Map.entry("Poly", "help.aero.poly.text"),
+            Map.entry("print", "help.aero.print.text"),
+            Map.entry("getPos", "help.aero.getpos.text"),
+            Map.entry("getRot", "help.aero.getrot.text"),
+            Map.entry("getVel", "help.aero.getvel.text")
+    );
+
     private boolean readOnly = false;
+
+    private static final int SCROLLBAR_SIZE = 7;
+    private static final int SCROLLBAR_MIN_THUMB = 15;
+
+    private boolean draggingVerticalScrollbar = false;
+    private boolean draggingHorizontalScrollbar = false;
+
+    private int scrollbarDragOffset = 0;
 
     public void setReadOnly(boolean readOnly) {
         this.readOnly = readOnly;
@@ -156,8 +181,26 @@ public class CodeEditorWidget extends AbstractWidget {
         return readOnly;
     }
 
-    public CodeEditorWidget(int x, int y, int width, int height, String text,
-                            BoardComputerBlockEntity.EditorCompletions completions) {
+    private Consumer<String> helpCallback;
+
+    private record HelpWordHit(
+            String word,
+            int line,
+            int startColumn,
+            int endColumn
+    ) {}
+
+    private HelpWordHit hoveredHelpWord;
+
+    public CodeEditorWidget(
+            int x,
+            int y,
+            int width,
+            int height,
+            String text,
+            BoardComputerBlockEntity.EditorCompletions completions,
+            Consumer<String> helpCallback
+    ) {
         super(x, y, width, height, Component.empty());
         lines.addAll(List.of(text.split("\n", -1)));
 
@@ -169,6 +212,7 @@ public class CodeEditorWidget extends AbstractWidget {
 
         this.builtins = completions.builtins();
         this.nativeClasses = completions.nativeClasses();
+        this.helpCallback = helpCallback;
 
         rescanLocalCompletions();
     }
@@ -193,6 +237,12 @@ public class CodeEditorWidget extends AbstractWidget {
 
         Minecraft mc = Minecraft.getInstance();
 
+        hoveredHelpWord = null;
+
+        if (hasControlDown()) {
+            hoveredHelpWord = getHelpWordAt(mouseX, mouseY);
+        }
+
         // Background
         guiGraphics.fill(
                 getX(),
@@ -210,13 +260,13 @@ public class CodeEditorWidget extends AbstractWidget {
                 getY() + height,
                 0xFF181818
         );
-        
+
 
         guiGraphics.enableScissor(
-                getX(),  // left
-                getY(),                    // top
-                getX() + width,            // right
-                getY() + height            // bottom
+                getX(),
+                getY(),
+                getX() + width - SCROLLBAR_SIZE,
+                getY() + height - SCROLLBAR_SIZE
         );
 
         //Draw numbers
@@ -241,8 +291,8 @@ public class CodeEditorWidget extends AbstractWidget {
         guiGraphics.enableScissor(
                 getX() + lineNumberWidth,  // left
                 getY(),                    // top
-                getX() + width,            // right
-                getY() + height            // bottom
+                getX() + width - SCROLLBAR_SIZE,            // right
+                getY() + height - SCROLLBAR_SIZE            // bottom
         );
 
         // Draw selection
@@ -307,7 +357,8 @@ public class CodeEditorWidget extends AbstractWidget {
                     mc,
                     lines.get(i),
                     getX() + lineNumberWidth + 5 - scrollX,
-                    getY() + 5 + i * lineHeight - scrollY
+                    getY() + 5 + i * lineHeight - scrollY,
+                    i
             );
         }
 
@@ -394,6 +445,8 @@ public class CodeEditorWidget extends AbstractWidget {
 
             guiGraphics.pose().popPose();
         }
+
+        drawScrollbars(guiGraphics);
     }
 
     @Override
@@ -403,14 +456,163 @@ public class CodeEditorWidget extends AbstractWidget {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        // =========================================================
+// Scrollbars
+// =========================================================
 
-        if (autocompleteOpen && !autocompleteSuggestions.isEmpty() && button == 0) {
-            int clickedIndex = getAutocompleteIndexAt(mouseX, mouseY);
+        if (button == 0) {
+
+            if (isOverVerticalScrollbar(mouseX, mouseY)) {
+
+                if (isOverVerticalThumb(mouseX, mouseY)) {
+
+                    draggingVerticalScrollbar = true;
+
+                    int viewportHeight = height - SCROLLBAR_SIZE;
+                    int contentHeight = Math.max(
+                            viewportHeight,
+                            lines.size() * lineHeight
+                    );
+
+                    int thumbHeight = Math.max(
+                            SCROLLBAR_MIN_THUMB,
+                            (int) ((float) viewportHeight
+                                    / contentHeight
+                                    * viewportHeight)
+                    );
+
+                    int maxScroll = contentHeight - viewportHeight;
+                    int maxThumbTravel = viewportHeight - thumbHeight;
+
+                    int thumbY = getY();
+
+                    if (maxThumbTravel > 0) {
+                        thumbY += (int) (
+                                ((float) scrollY / maxScroll)
+                                        * maxThumbTravel
+                        );
+                    }
+
+                    scrollbarDragOffset =
+                            (int) mouseY - thumbY;
+
+                } else {
+
+                    // Click on track
+                    int viewportHeight = height - SCROLLBAR_SIZE;
+                    int contentHeight = Math.max(
+                            viewportHeight,
+                            lines.size() * lineHeight
+                    );
+
+                    int maxScroll = contentHeight - viewportHeight;
+
+                    double percentage =
+                            ((mouseY - getY())
+                                    / (double) viewportHeight);
+
+                    scrollY = (int) (percentage * maxScroll);
+
+                    clampScroll();
+                }
+
+                return true;
+            }
+
+
+            if (isOverHorizontalScrollbar(mouseX, mouseY)) {
+
+                if (isOverHorizontalThumb(mouseX, mouseY)) {
+
+                    draggingHorizontalScrollbar = true;
+
+                    int viewportWidth =
+                            width - lineNumberWidth - SCROLLBAR_SIZE;
+
+                    int contentWidth = getContentWidth();
+
+                    int thumbWidth = Math.max(
+                            SCROLLBAR_MIN_THUMB,
+                            (int) ((float) viewportWidth
+                                    / contentWidth
+                                    * viewportWidth)
+                    );
+
+                    int maxScroll = contentWidth - viewportWidth;
+                    int maxThumbTravel = viewportWidth - thumbWidth;
+
+                    int thumbX = getX() + lineNumberWidth;
+
+                    if (maxThumbTravel > 0) {
+                        thumbX += (int) (
+                                ((float) scrollX / maxScroll)
+                                        * maxThumbTravel
+                        );
+                    }
+
+                    scrollbarDragOffset =
+                            (int) mouseX - thumbX;
+
+                } else {
+
+                    int viewportWidth =
+                            width - lineNumberWidth - SCROLLBAR_SIZE;
+
+                    int contentWidth = getContentWidth();
+
+                    int maxScroll =
+                            contentWidth - viewportWidth;
+
+                    double percentage =
+                            ((mouseX - getX() - lineNumberWidth)
+                                    / (double) viewportWidth);
+
+                    scrollX = (int) (percentage * maxScroll);
+
+                    clampScroll();
+                }
+
+                return true;
+            }
+        }
+
+        if (autocompleteOpen
+                && !autocompleteSuggestions.isEmpty()
+                && button == 0) {
+
+            int clickedIndex =
+                    getAutocompleteIndexAt(mouseX, mouseY);
+
             if (clickedIndex >= 0) {
                 autocompleteIndex = clickedIndex;
                 acceptAutocomplete();
                 return true;
             }
+        }
+
+        // Ctrl + click help link
+        if (hasControlDown() && button == 0) {
+
+            HelpWordHit helpWord =
+                    getHelpWordAt(mouseX, mouseY);
+
+            if (helpWord != null) {
+
+                String translationKey =
+                        HELP_LOOKUP.get(helpWord.word());
+
+                if (helpCallback != null) {
+                    helpCallback.accept(translationKey);
+                }
+
+                return true;
+            }
+        }
+
+        if (!isMouseOver(mouseX, mouseY)) {
+            setFocused(false);
+            clearSelection();
+            return false;
         }
 
         if (!isMouseOver(mouseX, mouseY)) {
@@ -468,10 +670,135 @@ public class CodeEditorWidget extends AbstractWidget {
     }
 
     @Override
-    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
-        AeroComputers.LOGGER.info("mouseDragged called, isDragging={}", isDragging);
+    public boolean mouseDragged(
+            double mouseX,
+            double mouseY,
+            int button,
+            double dragX,
+            double dragY
+    ) {
 
-        if (!isDragging || button != 0) {
+        if (button != 0) {
+            return false;
+        }
+
+        // =========================================================
+        // Vertical scrollbar dragging
+        // =========================================================
+
+        if (draggingVerticalScrollbar) {
+
+            int viewportHeight =
+                    height - SCROLLBAR_SIZE;
+
+            int contentHeight = Math.max(
+                    viewportHeight,
+                    lines.size() * lineHeight
+            );
+
+            int thumbHeight = Math.max(
+                    SCROLLBAR_MIN_THUMB,
+                    (int) ((float) viewportHeight
+                            / contentHeight
+                            * viewportHeight)
+            );
+
+            int maxThumbTravel =
+                    viewportHeight - thumbHeight;
+
+            int maxScroll =
+                    contentHeight - viewportHeight;
+
+            if (maxThumbTravel > 0 && maxScroll > 0) {
+
+                int newThumbY =
+                        (int) mouseY
+                                - getY()
+                                - scrollbarDragOffset;
+
+                newThumbY =
+                        Math.max(
+                                0,
+                                Math.min(
+                                        newThumbY,
+                                        maxThumbTravel
+                                )
+                        );
+
+                scrollY =
+                        (int) (
+                                (newThumbY
+                                        / (double) maxThumbTravel)
+                                        * maxScroll
+                        );
+
+                clampScroll();
+            }
+
+            return true;
+        }
+
+
+        // =========================================================
+        // Horizontal scrollbar dragging
+        // =========================================================
+
+        if (draggingHorizontalScrollbar) {
+
+            int viewportWidth =
+                    width - lineNumberWidth - SCROLLBAR_SIZE;
+
+            int contentWidth = getContentWidth();
+
+            int thumbWidth = Math.max(
+                    SCROLLBAR_MIN_THUMB,
+                    (int) ((float) viewportWidth
+                            / contentWidth
+                            * viewportWidth)
+            );
+
+            int maxThumbTravel =
+                    viewportWidth - thumbWidth;
+
+            int maxScroll =
+                    contentWidth - viewportWidth;
+
+            if (maxThumbTravel > 0 && maxScroll > 0) {
+
+                int newThumbX =
+                        (int) mouseX
+                                - getX()
+                                - lineNumberWidth
+                                - scrollbarDragOffset;
+
+                newThumbX =
+                        Math.max(
+                                0,
+                                Math.min(
+                                        newThumbX,
+                                        maxThumbTravel
+                                )
+                        );
+
+                scrollX =
+                        (int) (
+                                (newThumbX
+                                        / (double) maxThumbTravel)
+                                        * maxScroll
+                        );
+
+                clampScroll();
+            }
+
+            return true;
+        }
+
+
+        // =========================================================
+        // Normal text selection dragging
+        // =========================================================
+
+        if (!isDragging) {
             return false;
         }
 
@@ -480,6 +807,7 @@ public class CodeEditorWidget extends AbstractWidget {
         }
 
         int[] pos = getLineColumnAt(mouseX, mouseY);
+
         cursorLine = pos[0];
         cursorColumn = pos[1];
 
@@ -487,16 +815,27 @@ public class CodeEditorWidget extends AbstractWidget {
     }
 
     @Override
-    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+    public boolean mouseReleased(
+            double mouseX,
+            double mouseY,
+            int button
+    ) {
+
         if (button == 0) {
+
+            draggingVerticalScrollbar = false;
+            draggingHorizontalScrollbar = false;
+
             isDragging = false;
 
-            // a click-and-release at the exact same spot with no movement
-            // shouldn't leave a zero-width "selection" active
-            if (hasSelection() && selectionLine == cursorLine && selectionColumn == cursorColumn) {
+            if (hasSelection()
+                    && selectionLine == cursorLine
+                    && selectionColumn == cursorColumn) {
+
                 clearSelection();
             }
         }
+
         return true;
     }
 
@@ -1089,15 +1428,30 @@ public class CodeEditorWidget extends AbstractWidget {
         return String.join("\n", lines);
     }
 
+    public void setText(String text) {
+        lines.clear();
+        lines.addAll(List.of(text.split("\n", -1)));
+    }
+
     @Override
-    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+    public boolean mouseScrolled(
+            double mouseX,
+            double mouseY,
+            double scrollX,
+            double scrollY
+    ) {
 
         if (!isMouseOver(mouseX, mouseY))
             return false;
 
+        if (hasShiftDown()) {
 
-        this.scrollY -= (int)(scrollY * lineHeight * 3);
+            this.scrollX -= (int) (scrollY * 30);
 
+        } else {
+
+            this.scrollY -= (int) (scrollY * lineHeight * 3);
+        }
 
         clampScroll();
 
@@ -1106,9 +1460,19 @@ public class CodeEditorWidget extends AbstractWidget {
 
     private void clampScroll() {
 
+        // =========================================================
+        // Vertical
+        // =========================================================
+
+        int viewportHeight =
+                height - SCROLLBAR_SIZE;
+
+        int contentHeight =
+                (lines.size() + 1) * lineHeight;
+
         int maxY = Math.max(
                 0,
-                lines.size() * lineHeight - height + lineHeight
+                contentHeight - viewportHeight
         );
 
         scrollY = Math.max(
@@ -1117,20 +1481,19 @@ public class CodeEditorWidget extends AbstractWidget {
         );
 
 
-        int maxX = 0;
+        // =========================================================
+        // Horizontal
+        // =========================================================
 
-        Minecraft mc = Minecraft.getInstance();
+        int viewportWidth =
+                width - lineNumberWidth - SCROLLBAR_SIZE;
 
-        for (String line : lines) {
-            maxX = Math.max(
-                    maxX,
-                    mc.font.width(line)
-            );
-        }
+        int contentWidth =
+                getContentWidth();
 
-        maxX = Math.max(
+        int maxX = Math.max(
                 0,
-                maxX - (width - lineNumberWidth - 10)
+                contentWidth - viewportWidth
         );
 
         scrollX = Math.max(
@@ -1167,21 +1530,47 @@ public class CodeEditorWidget extends AbstractWidget {
     }
 
     private int[] getLineColumnAt(double mouseX, double mouseY) {
+
         Minecraft mc = Minecraft.getInstance();
 
-        int relativeY = (int) mouseY - getY() - 5 + scrollY;
+        int relativeY =
+                (int) mouseY
+                        - getY()
+                        - 5
+                        + scrollY;
+
         int line = relativeY / lineHeight;
 
-        if (line < 0) line = 0;
-        if (line >= lines.size()) line = lines.size() - 1;
+        if (line < 0) {
+            line = 0;
+        }
+
+        if (line >= lines.size()) {
+            line = lines.size() - 1;
+        }
 
         String textLine = lines.get(line);
-        int relativeX = (int) mouseX - getX() - lineNumberWidth - 5 + scrollX;
+
+        int relativeX =
+                (int) mouseX
+                        - getX()
+                        - lineNumberWidth
+                        - 5
+                        + scrollX;
 
         int column = 0;
+
         for (int i = 0; i < textLine.length(); i++) {
-            int width = mc.font.width(textLine.substring(0, i + 1));
-            if (width > relativeX) break;
+
+            int textWidth =
+                    mc.font.width(
+                            textLine.substring(0, i + 1)
+                    );
+
+            if (textWidth > relativeX) {
+                break;
+            }
+
             column = i + 1;
         }
 
@@ -1222,7 +1611,8 @@ public class CodeEditorWidget extends AbstractWidget {
             Minecraft mc,
             String line,
             int x,
-            int y
+            int y,
+            int lineIndex
     ) {
         int drawX = x;
 
@@ -1279,17 +1669,41 @@ public class CodeEditorWidget extends AbstractWidget {
                     i++;
                 }
 
-                String text = line.substring(start, i);
+                String word = line.substring(start, i);
+
+                int color = getIdentifierColor(
+                        line,
+                        start,
+                        i,
+                        word
+                );
 
                 graphics.drawString(
                         mc.font,
-                        text,
+                        word,
                         drawX,
                         y,
-                        COLOR_STRING
+                        color
                 );
 
-                drawX += mc.font.width(text);
+// Ctrl + hover help underline
+                if (hoveredHelpWord != null
+                        && hoveredHelpWord.line() == lineIndex
+                        && hoveredHelpWord.startColumn() == start
+                        && hoveredHelpWord.endColumn() == i) {
+
+                    int wordWidth = mc.font.width(word);
+
+                    graphics.fill(
+                            drawX,
+                            y + mc.font.lineHeight - 1,
+                            drawX + wordWidth,
+                            y + mc.font.lineHeight,
+                            0xFF3399FF
+                    );
+                }
+
+                drawX += mc.font.width(word);
                 continue;
             }
 
@@ -1408,6 +1822,23 @@ public class CodeEditorWidget extends AbstractWidget {
                         y,
                         color
                 );
+
+// Ctrl + hover help underline
+                if (hoveredHelpWord != null
+                        && hoveredHelpWord.line() == lineIndex
+                        && hoveredHelpWord.startColumn() == start
+                        && hoveredHelpWord.endColumn() == i) {
+
+                    int wordWidth = mc.font.width(word);
+
+                    graphics.fill(
+                            drawX,
+                            y + mc.font.lineHeight - 1,
+                            drawX + wordWidth,
+                            y + mc.font.lineHeight,
+                            0xFF3399FF
+                    );
+                }
 
                 drawX += mc.font.width(word);
                 continue;
@@ -1532,7 +1963,7 @@ public class CodeEditorWidget extends AbstractWidget {
                 line.substring(0, cursorColumn)
         );
 
-        int textAreaWidth = width - lineNumberWidth - 10;
+        int textAreaWidth = width - lineNumberWidth - 10 - SCROLLBAR_SIZE;
 
         // Cursor is too far left
         if (cursorTextX < scrollX) {
@@ -1967,4 +2398,340 @@ public class CodeEditorWidget extends AbstractWidget {
             cursorColumn -= removed;
         }
     }
+
+
+    private HelpWordHit getHelpWordAt(double mouseX, double mouseY) {
+        if (!HELP_LOOKUP.containsKey("")) {
+            // no-op; keeps this method independent of rendering
+        }
+
+        Minecraft mc = Minecraft.getInstance();
+
+        // Convert mouse Y into document line
+        int relativeY = (int) mouseY - getY() - 5 + scrollY;
+
+        if (relativeY < 0) {
+            return null;
+        }
+
+        int lineIndex = relativeY / lineHeight;
+
+        if (lineIndex < 0 || lineIndex >= lines.size()) {
+            return null;
+        }
+
+        String line = lines.get(lineIndex);
+
+        // Convert mouse X into text coordinates
+        int relativeX =
+                (int) mouseX
+                        - getX()
+                        - lineNumberWidth
+                        - 5
+                        + scrollX;
+
+        if (relativeX < 0) {
+            return null;
+        }
+
+        // Find which character the mouse is over
+        int column = 0;
+
+        for (int i = 0; i < line.length(); i++) {
+            int charWidth = mc.font.width(line.substring(0, i + 1));
+
+            if (charWidth > relativeX) {
+                column = i;
+                break;
+            }
+
+            column = i + 1;
+        }
+
+        // Find identifier around the column
+        if (column > line.length()) {
+            column = line.length();
+        }
+
+        int start = column;
+
+        while (start > 0) {
+            char c = line.charAt(start - 1);
+
+            if (!Character.isLetterOrDigit(c) && c != '_') {
+                break;
+            }
+
+            start--;
+        }
+
+        int end = column;
+
+        while (end < line.length()) {
+            char c = line.charAt(end);
+
+            if (!Character.isLetterOrDigit(c) && c != '_') {
+                break;
+            }
+
+            end++;
+        }
+
+        if (start == end) {
+            return null;
+        }
+
+        String word = line.substring(start, end);
+
+        if (!HELP_LOOKUP.containsKey(word)) {
+            return null;
+        }
+
+        return new HelpWordHit(
+                word,
+                lineIndex,
+                start,
+                end
+        );
+    }
+
+    private void drawScrollbars(GuiGraphics guiGraphics) {
+
+        // =========================================================
+        // Vertical scrollbar
+        // =========================================================
+
+        int viewportHeight = height - SCROLLBAR_SIZE;
+
+        int contentHeight = Math.max(
+                viewportHeight,
+                lines.size() * lineHeight
+        );
+
+        boolean needsVertical = contentHeight > viewportHeight;
+
+        if (needsVertical) {
+
+            int trackX = getX() + width - SCROLLBAR_SIZE;
+            int trackY = getY();
+
+            int trackHeight = viewportHeight;
+
+            // Thumb size based on visible/content ratio
+            int thumbHeight = Math.max(
+                    SCROLLBAR_MIN_THUMB,
+                    (int) ((float) viewportHeight / contentHeight * trackHeight)
+            );
+
+            int maxScroll = Math.max(
+                    1,
+                    contentHeight - viewportHeight
+            );
+
+            int maxThumbTravel = trackHeight - thumbHeight;
+
+            int thumbY = trackY;
+
+            if (maxThumbTravel > 0) {
+                thumbY += (int) (
+                        ((float) scrollY / maxScroll)
+                                * maxThumbTravel
+                );
+            }
+
+            // Track
+            guiGraphics.fill(
+                    trackX,
+                    trackY,
+                    trackX + SCROLLBAR_SIZE,
+                    trackY + trackHeight,
+                    0xFF181818
+            );
+
+            // Thumb
+            guiGraphics.fill(
+                    trackX + 1,
+                    thumbY + 1,
+                    trackX + SCROLLBAR_SIZE - 1,
+                    thumbY + thumbHeight - 1,
+                    draggingVerticalScrollbar
+                            ? 0xFFAAAAAA
+                            : 0xFF666666
+            );
+        }
+
+
+        // =========================================================
+        // Horizontal scrollbar
+        // =========================================================
+
+        int viewportWidth =
+                width - lineNumberWidth - SCROLLBAR_SIZE;
+
+        int contentWidth = getContentWidth();
+
+        boolean needsHorizontal = contentWidth > viewportWidth;
+
+        if (needsHorizontal) {
+
+            int trackX = getX() + lineNumberWidth;
+            int trackY = getY() + height - SCROLLBAR_SIZE;
+
+            int trackWidth = viewportWidth;
+
+            int thumbWidth = Math.max(
+                    SCROLLBAR_MIN_THUMB,
+                    (int) ((float) viewportWidth / contentWidth * trackWidth)
+            );
+
+            int maxScroll = Math.max(
+                    1,
+                    contentWidth - viewportWidth
+            );
+
+            int maxThumbTravel = trackWidth - thumbWidth;
+
+            int thumbX = trackX;
+
+            if (maxThumbTravel > 0) {
+                thumbX += (int) (
+                        ((float) scrollX / maxScroll)
+                                * maxThumbTravel
+                );
+            }
+
+            // Track
+            guiGraphics.fill(
+                    trackX,
+                    trackY,
+                    trackX + trackWidth,
+                    trackY + SCROLLBAR_SIZE,
+                    0xFF181818
+            );
+
+            // Thumb
+            guiGraphics.fill(
+                    thumbX + 1,
+                    trackY + 1,
+                    thumbX + thumbWidth - 1,
+                    trackY + SCROLLBAR_SIZE - 1,
+                    draggingHorizontalScrollbar
+                            ? 0xFFAAAAAA
+                            : 0xFF666666
+            );
+        }
+    }
+
+    private int getContentWidth() {
+
+        Minecraft mc = Minecraft.getInstance();
+
+        int maxWidth = 0;
+
+        for (String line : lines) {
+            maxWidth = Math.max(
+                    maxWidth,
+                    mc.font.width(line)
+            );
+        }
+
+        return maxWidth + 10;
+    }
+
+    private boolean isOverVerticalScrollbar(double mouseX, double mouseY) {
+
+        int x = getX() + width - SCROLLBAR_SIZE;
+
+        return mouseX >= x
+                && mouseX <= getX() + width
+                && mouseY >= getY()
+                && mouseY <= getY() + height - SCROLLBAR_SIZE;
+    }
+
+    private boolean isOverHorizontalScrollbar(double mouseX, double mouseY) {
+
+        int x = getX() + lineNumberWidth;
+        int y = getY() + height - SCROLLBAR_SIZE;
+
+        return mouseX >= x
+                && mouseX <= getX() + width - SCROLLBAR_SIZE
+                && mouseY >= y
+                && mouseY <= getY() + height;
+    }
+
+    private boolean isOverVerticalThumb(double mouseX, double mouseY) {
+
+        int viewportHeight = height - SCROLLBAR_SIZE;
+
+        int contentHeight = Math.max(
+                viewportHeight,
+                lines.size() * lineHeight
+        );
+
+        if (contentHeight <= viewportHeight) {
+            return false;
+        }
+
+        int trackHeight = viewportHeight;
+
+        int thumbHeight = Math.max(
+                SCROLLBAR_MIN_THUMB,
+                (int) ((float) viewportHeight / contentHeight * trackHeight)
+        );
+
+        int maxScroll = contentHeight - viewportHeight;
+        int maxThumbTravel = trackHeight - thumbHeight;
+
+        int thumbY = getY();
+
+        if (maxThumbTravel > 0) {
+            thumbY += (int) (
+                    ((float) scrollY / maxScroll)
+                            * maxThumbTravel
+            );
+        }
+
+        return mouseX >= getX() + width - SCROLLBAR_SIZE
+                && mouseX <= getX() + width
+                && mouseY >= thumbY
+                && mouseY <= thumbY + thumbHeight;
+    }
+
+    private boolean isOverHorizontalThumb(double mouseX, double mouseY) {
+
+        int viewportWidth =
+                width - lineNumberWidth - SCROLLBAR_SIZE;
+
+        int contentWidth = getContentWidth();
+
+        if (contentWidth <= viewportWidth) {
+            return false;
+        }
+
+        int trackWidth = viewportWidth;
+
+        int thumbWidth = Math.max(
+                SCROLLBAR_MIN_THUMB,
+                (int) ((float) viewportWidth / contentWidth * trackWidth)
+        );
+
+        int maxScroll = contentWidth - viewportWidth;
+        int maxThumbTravel = trackWidth - thumbWidth;
+
+        int thumbX = getX() + lineNumberWidth;
+
+        if (maxThumbTravel > 0) {
+            thumbX += (int) (
+                    ((float) scrollX / maxScroll)
+                            * maxThumbTravel
+            );
+        }
+
+        return mouseX >= thumbX
+                && mouseX <= thumbX + thumbWidth
+                && mouseY >= getY() + height - SCROLLBAR_SIZE
+                && mouseY <= getY() + height;
+    }
+
+
 }

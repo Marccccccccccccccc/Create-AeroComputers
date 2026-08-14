@@ -21,6 +21,7 @@ import net.tui.aerocomputers.network.BoardComputerVariablePayload;
 import net.tui.aerocomputers.screen.CodeEditorWidget;
 import net.tui.aerocomputers.screen.HelpWidget;
 import net.tui.aerocomputers.screen.ItemIconButton;
+import org.checkerframework.checker.units.qual.A;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
@@ -33,7 +34,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
 
 public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMenu> {
     private CodeEditorWidget editor;
@@ -67,6 +71,19 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
     private int lastEditorCompletionUpdateId = -1;
 
     private HelpWidget helpWidget;
+
+    private final List<PendingChannelLoad> pendingChannelLoads = new ArrayList<>();
+
+    private record PendingChannelLoad(
+            BoardComputerChannelPayload.Direction direction,
+            String name,
+            String mode,
+            String freqA,
+            String freqB
+    ) {}
+
+    private int lastInputChannelCount = -1;
+    private int lastOutputChannelCount = -1;
 
     public BoardComputerScreen(BoardComputerMenu menu, Inventory playerInventory, Component title) {
         super(menu, playerInventory, title);
@@ -113,7 +130,8 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
                 275,
                 303,
                 menu.blockEntity.getProgram(),
-                menu.blockEntity.getEditorCompletions()
+                menu.blockEntity.getEditorCompletions(),
+                this::openHelp
         );
         addRenderableWidget(editor);
         setInitialFocus(editor);
@@ -146,17 +164,7 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
                 Button.builder(
                         Component.literal("?"),
                         btn -> {
-                            if (helpWidget == null) {
-                                helpWidget = new HelpWidget(
-                                        (width - 300) / 2,
-                                        (height - 180) / 2,
-                                        300,
-                                        180,
-                                        menu.blockEntity.getEditorCompletions()
-                                );
-
-                                addRenderableWidget(helpWidget);
-                            }
+                            openHelp("help.aero.basics.text");
                         }
                 ).bounds(leftPos + 110, buttonY, 20, 20).build()
         );
@@ -166,13 +174,14 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
                 PointerBuffer filters = stack.mallocPointer(1);
                 filters.put(MemoryUtil.memAddress(stack.UTF8("*.txt")));
                 filters.flip();
+                String data = saveData();
                 String filePath = TinyFileDialogs.tinyfd_saveFileDialog(
                         "Save My Data",
-                        "mydata.txt",
+                        "code.txt",
                         filters,
                         "Text files" );
                 if (filePath == null) { return; }
-                try { Files.writeString( Paths.get(filePath), "Hello! This is my custom data." );
+                try { Files.writeString( Paths.get(filePath),data);
                     System.out.println("Saved to: " + filePath); }
                 catch (IOException e) { e.printStackTrace();}}}
         ).bounds(leftPos + 132, buttonY, 20, 20).build());
@@ -196,26 +205,250 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
         ).bounds(leftPos + 154, buttonY, 20, 20).build() );
 
 
-    int tabX = leftPos + 8;
-                int tabY = topPos + 20;
+        int tabX = leftPos + 8;
+        int tabY = topPos + 20;
 
-                tabMemoryButton = addRenderableWidget(Button.builder(
-                        Component.literal("Memory"), btn -> switchTab(Tab.MEMORY)
-                ).bounds(tabX, tabY, 55, 20).build());
+        tabMemoryButton = addRenderableWidget(Button.builder(
+                Component.literal("Memory"), btn -> switchTab(Tab.MEMORY)
+        ).bounds(tabX, tabY, 55, 20).build());
 
-                tabInputButton = addRenderableWidget(Button.builder(
-                        Component.literal("RL In"), btn -> switchTab(Tab.RL_INPUT)
-                ).bounds(tabX + 57, tabY, 55, 20).build());
+        tabInputButton = addRenderableWidget(Button.builder(
+                Component.literal("RL In"), btn -> switchTab(Tab.RL_INPUT)
+        ).bounds(tabX + 57, tabY, 55, 20).build());
 
-                tabOutputButton = addRenderableWidget(Button.builder(
-                        Component.literal("RL Out"), btn -> switchTab(Tab.RL_OUTPUT)
-                ).bounds(tabX + 114, tabY, 55, 20).build());
+        tabOutputButton = addRenderableWidget(Button.builder(
+                Component.literal("RL Out"), btn -> switchTab(Tab.RL_OUTPUT)
+        ).bounds(tabX + 114, tabY, 55, 20).build());
 
-                switchTab(Tab.MEMORY);
-            }
+        switchTab(Tab.MEMORY);
+
+        lastInputChannelCount = menu.blockEntity.getInputChannels().size();
+        lastOutputChannelCount = menu.blockEntity.getOutputChannels().size();
+    }
+
+    private void openHelp(String translationKey) {
+
+        if (helpWidget != null) {
+            removeWidget(helpWidget);
+        }
+
+        helpWidget = new HelpWidget(
+                (width - 300) / 2,
+                (height - 180) / 2,
+                300,
+                180,
+                menu.blockEntity.getEditorCompletions(),
+                translationKey
+        );
+
+        addRenderableWidget(helpWidget);
+    }
 
     public void loadData(String data) {
-        AeroComputers.LOGGER.info(data);
+        AeroComputers.LOGGER.info("Load Data");
+
+        // Split into exactly 5 parts:
+        // variables
+        // inputs
+        // outputs
+        // computer name
+        // program
+        String[] dataParts = data.split(";-;-;-;-;-;-;-;-;-;", 5);
+
+        if (dataParts.length < 5) {
+            AeroComputers.LOGGER.error("Invalid save file!");
+            return;
+        }
+
+        AeroComputers.LOGGER.info("Variables: " + dataParts[0]);
+        AeroComputers.LOGGER.info("Inputs: " + dataParts[1]);
+        AeroComputers.LOGGER.info("Outputs: " + dataParts[2]);
+        AeroComputers.LOGGER.info("Name: " + dataParts[3]);
+
+        // Variables
+        if (!dataParts[0].isBlank()) {
+            for (String variable : dataParts[0].split(",")) {
+                variable = variable.trim();
+
+                if (variable.isBlank()) {
+                    continue;
+                }
+
+                String[] parts = variable.split("=", 2);
+
+                if (parts.length != 2) {
+                    continue;
+                }
+
+                String name = parts[0].trim();
+                double value = Double.parseDouble(parts[1].trim());
+
+                PacketDistributor.sendToServer(new BoardComputerVariablePayload(
+                        menu.blockEntity.getBlockPos(),
+                        BoardComputerVariablePayload.Action.ADD,
+                        name,
+                        ""
+                ));
+
+                PacketDistributor.sendToServer(new BoardComputerVariablePayload(
+                        menu.blockEntity.getBlockPos(),
+                        BoardComputerVariablePayload.Action.SET_VALUE,
+                        name,
+                        String.valueOf(value)
+                ));
+            }
+        }
+
+        loadChannels(
+                dataParts[1],
+                BoardComputerChannelPayload.Direction.INPUT
+        );
+
+        loadChannels(
+                dataParts[2],
+                BoardComputerChannelPayload.Direction.OUTPUT
+        );
+
+        // Name
+        PacketDistributor.sendToServer(new BoardComputerControlPayload(
+                menu.blockEntity.getBlockPos(),
+                BoardComputerControlPayload.Action.NAME,
+                dataParts[3]
+        ));
+
+        // Program
+        editor.setText(dataParts[4]);
+
+        PacketDistributor.sendToServer(new BoardComputerEditPayload(
+                menu.blockEntity.getBlockPos(),
+                editor.getText()
+        ));
+
+        rebuildPanel();
+    }
+
+    public String saveData() {
+        AeroComputers.LOGGER.info("Save Data");
+
+        PacketDistributor.sendToServer(
+                new BoardComputerEditPayload(
+                        menu.blockEntity.getBlockPos(),
+                        editor.getText()
+                )
+        );
+
+        PacketDistributor.sendToServer(
+                new BoardComputerControlPayload(
+                        menu.blockEntity.getBlockPos(),
+                        BoardComputerControlPayload.Action.RESTART,
+                        ""
+                )
+        );
+
+        String variables = menu.blockEntity.getPersistentVariablesSnapshot()
+                .entrySet()
+                .stream()
+                .map(e -> e.getKey() + "=" + e.getValue())
+                .collect(java.util.stream.Collectors.joining(","));
+
+        String inputs = saveChannels(menu.blockEntity.getInputChannels());
+        String outputs = saveChannels(menu.blockEntity.getOutputChannels());
+
+        return variables + ";-;-;-;-;-;-;-;-;-;" +
+                inputs + ";-;-;-;-;-;-;-;-;-;" +
+                outputs + ";-;-;-;-;-;-;-;-;-;" +
+                menu.blockEntity.getComputerName() + ";-;-;-;-;-;-;-;-;-;" +
+                menu.blockEntity.getProgram();
+    }
+
+    private String saveChannels(List<BoardComputerBlockEntity.IOChannel> channels) {
+        return channels.stream()
+                .map(ch -> String.join("|",
+                        ch.variableName,
+                        ch.mode.name(),
+                        String.valueOf(ch.freqA),
+                        String.valueOf(ch.freqB)
+                ))
+                .collect(java.util.stream.Collectors.joining(";"));
+    }
+
+    private void loadChannels(String data, BoardComputerChannelPayload.Direction dir) {
+        if (data == null || data.isBlank() || data.equals("[]")) {
+            return;
+        }
+
+        // IMPORTANT:
+        // Only remove channels belonging to this direction.
+        if (dir == BoardComputerChannelPayload.Direction.INPUT) {
+            for (var channel : new ArrayList<>(menu.blockEntity.getInputChannels())) {
+                PacketDistributor.sendToServer(new BoardComputerChannelPayload(
+                        menu.blockEntity.getBlockPos(),
+                        BoardComputerChannelPayload.Direction.INPUT,
+                        BoardComputerChannelPayload.Action.REMOVE,
+                        channel.id,
+                        ""
+                ));
+            }
+        } else {
+            for (var channel : new ArrayList<>(menu.blockEntity.getOutputChannels())) {
+                PacketDistributor.sendToServer(new BoardComputerChannelPayload(
+                        menu.blockEntity.getBlockPos(),
+                        BoardComputerChannelPayload.Direction.OUTPUT,
+                        BoardComputerChannelPayload.Action.REMOVE,
+                        channel.id,
+                        ""
+                ));
+            }
+        }
+
+        // Parse the saved channels.
+        for (String c : data.split(";")) {
+            if (c.isBlank()) {
+                continue;
+            }
+
+            // Saved format:
+            // name|mode|freqA|freqB
+            String[] channel = c.split("\\|", 4);
+
+            if (channel.length != 4) {
+                AeroComputers.LOGGER.error(
+                        "Invalid channel data: '{}'",
+                        c
+                );
+                continue;
+            }
+
+            pendingChannelLoads.add(new PendingChannelLoad(
+                    dir,
+                    channel[0],
+                    channel[1],
+                    channel[2],
+                    channel[3]
+            ));
+        }
+
+        // Start creating the first channel.
+        processNextPendingChannel();
+    }
+
+    private boolean channelLoadInFlight = false;
+
+    private void processNextPendingChannel() {
+        if (pendingChannelLoads.isEmpty() || channelLoadInFlight) {
+            return;
+        }
+
+        channelLoadInFlight = true;
+        PendingChannelLoad pending = pendingChannelLoads.getFirst();
+
+        PacketDistributor.sendToServer(new BoardComputerChannelPayload(
+                menu.blockEntity.getBlockPos(),
+                pending.direction(),
+                BoardComputerChannelPayload.Action.ADD,
+                "",
+                ""
+        ));
     }
 
     private void switchTab(Tab tab) {
@@ -376,17 +609,90 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
         int in = menu.blockEntity.getInputChannels().size();
         int out = menu.blockEntity.getOutputChannels().size();
 
-        if (channelId != lastChannelUpdateId
-                || variableId != lastVariableUpdateId
-                || in != lastInputSize
-                || out != lastOutputSize) {
+        // Detect a newly-created channel.
+        if (in != lastInputChannelCount || out != lastOutputChannelCount) {
 
-            lastChannelUpdateId = channelId;
-            lastVariableUpdateId = variableId;
-            lastInputSize = in;
-            lastOutputSize = out;
+            boolean inputAdded = in > lastInputChannelCount;
+            boolean outputAdded = out > lastOutputChannelCount;
 
-            rebuildPanel();
+            lastInputChannelCount = in;
+            lastOutputChannelCount = out;
+
+            if (!pendingChannelLoads.isEmpty()) {
+                PendingChannelLoad pending = pendingChannelLoads.getFirst();
+
+                boolean correctDirection =
+                        (pending.direction() == BoardComputerChannelPayload.Direction.INPUT && inputAdded)
+                                || (pending.direction() == BoardComputerChannelPayload.Direction.OUTPUT && outputAdded);
+
+                if (correctDirection) {
+                    var channels =
+                            pending.direction() == BoardComputerChannelPayload.Direction.INPUT
+                                    ? menu.blockEntity.getInputChannels()
+                                    : menu.blockEntity.getOutputChannels();
+
+                    if (!channels.isEmpty()) {
+                        var newChannel = channels.getLast();
+                        String id = newChannel.id;
+
+                        // Now the client actually knows the ID.
+                        PacketDistributor.sendToServer(new BoardComputerChannelPayload(
+                                menu.blockEntity.getBlockPos(),
+                                pending.direction(),
+                                BoardComputerChannelPayload.Action.RENAME,
+                                id,
+                                pending.name()
+                        ));
+
+                        PacketDistributor.sendToServer(new BoardComputerChannelPayload(
+                                menu.blockEntity.getBlockPos(),
+                                pending.direction(),
+                                BoardComputerChannelPayload.Action.SET_FREQ_A,
+                                id,
+                                pending.freqA()
+                        ));
+
+                        PacketDistributor.sendToServer(new BoardComputerChannelPayload(
+                                menu.blockEntity.getBlockPos(),
+                                pending.direction(),
+                                BoardComputerChannelPayload.Action.SET_FREQ_B,
+                                id,
+                                pending.freqB()
+                        ));
+
+                        PacketDistributor.sendToServer(new BoardComputerChannelPayload(
+                                menu.blockEntity.getBlockPos(),
+                                pending.direction(),
+                                BoardComputerChannelPayload.Action.SET_MODE,
+                                id,
+                                pending.mode()
+                        ));
+
+                        // Finished this channel.
+                        pendingChannelLoads.removeFirst();
+                        channelLoadInFlight = false;
+
+                        // Create the next one.
+                        if (!pendingChannelLoads.isEmpty()) {
+                            processNextPendingChannel();
+                        }
+                    }
+                }
+            }
+
+            // Existing panel update logic.
+            if (channelId != lastChannelUpdateId
+                    || variableId != lastVariableUpdateId
+                    || in != lastInputSize
+                    || out != lastOutputSize) {
+
+                lastChannelUpdateId = channelId;
+                lastVariableUpdateId = variableId;
+                lastInputSize = in;
+                lastOutputSize = out;
+
+                rebuildPanel();
+            }
         }
 
         if (completionId != lastEditorCompletionUpdateId) {
@@ -503,7 +809,25 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
     }
 
     @Override
-    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+    public boolean mouseScrolled(
+            double mouseX,
+            double mouseY,
+            double scrollX,
+            double scrollY
+    ) {
+        // Help popup gets scroll priority.
+        if (helpWidget != null && helpWidget.visible
+                && helpWidget.isMouseOver(mouseX, mouseY)) {
+
+            return helpWidget.mouseScrolled(
+                    mouseX,
+                    mouseY,
+                    scrollX,
+                    scrollY
+            );
+        }
+
+        // Normal panel scrolling
         if (mouseX >= leftPos + PANEL_X &&
                 mouseX <= leftPos + PANEL_X + PANEL_WIDTH &&
                 mouseY >= topPos + PANEL_Y &&
@@ -520,6 +844,7 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
             rebuildPanel();
             return true;
         }
+
         return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
     }
 

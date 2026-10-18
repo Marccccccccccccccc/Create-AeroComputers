@@ -1,5 +1,8 @@
 package net.tui.aerocomputers.block.entity;
 
+import com.defpwoq.createarms.block.ChinGunBlockEntity;
+import com.defpwoq.createarms.block.MFDControllerBlockEntity;
+import com.defpwoq.createarms.util.SableHelper;
 import com.simibubi.create.content.kinetics.base.DirectionalKineticBlock;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.redstone.link.LinkBehaviour;
@@ -7,41 +10,69 @@ import com.simibubi.create.content.redstone.link.RedstoneLinkFrequencySlot;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import com.simibubi.create.foundation.blockEntity.behaviour.ValueBoxTransform;
 import dev.ryanhcode.sable.api.block.BlockEntitySubLevelActor;
-import dev.ryanhcode.sable.companion.math.Pose3dc;
+import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
+import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.companion.SableCompanion;
+import dev.ryanhcode.sable.companion.SubLevelAccess;
+import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.SubLevel;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.protocol.Packet;
-import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.MenuProvider;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.BlockStateProperties;
-import net.neoforged.neoforge.items.ItemStackHandler;
 import net.tui.aerocomputers.AeroComputers;
 import net.tui.aerocomputers.screen.custom.BoardComputerMenu;
 import org.apache.commons.lang3.tuple.Pair;
 import org.jetbrains.annotations.Nullable;
+import org.joml.Matrix4d;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
-import org.joml.Vector3dc;
 
 import java.util.*;
 
-import static org.apache.commons.lang3.math.NumberUtils.toDouble;
 
 public class BoardComputerBlockEntity extends KineticBlockEntity implements MenuProvider, BlockEntitySubLevelActor {
+
+    public List<List<Double>> getAllSubLevelPositions() {
+        List<List<Double>> allPositions = new ArrayList<>();
+
+        if (this.level == null) {
+            return allPositions;
+        }
+
+        SubLevelContainer container =
+                ServerSubLevelContainer.getContainer(this.level);
+
+        if (container == null) {
+            return allPositions;
+        }
+
+        for (SubLevel subLevel : container.getAllSubLevels()) {
+            Vector3d pos = subLevel.logicalPose().position();
+
+            allPositions.add(List.of(
+                    round2(pos.x()),
+                    round2(pos.y()),
+                    round2(pos.z())
+            ));
+        }
+
+        return allPositions;
+    }
+
 
     private int transmittedSignal;
     private int receivedSignal;
@@ -594,6 +625,82 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
     public void tick() {
         super.tick();
         printsThisTick = 0;
+
+        if (this.level != null && !this.level.isClientSide()) {
+
+            BlockEntity be = SableHelper.findBlockEntity(this.level, this.getBlockPos().below());
+
+            if (be instanceof MFDControllerBlockEntity mfdController) {
+                BlockPos cgPos = mfdController.getChinGunPos();
+
+                if (cgPos != null && !cgPos.equals(BlockPos.ZERO)) {
+                    if(!this.level.isClientSide) {
+                        BlockEntity cbe = level.getBlockEntity(cgPos);
+                        if(cbe instanceof ChinGunBlockEntity chinGun) {
+                            List<List<Double>> positions = getAllSubLevelPositions();
+
+                            Vector3d gunLocalPos = new Vector3d(
+                                    cgPos.getX() + 0.5,
+                                    cgPos.getY() + 0.5,
+                                    cgPos.getZ() + 0.5
+                            );
+
+                            Vector3d gunGlobalPos =
+                                    SableCompanion.INSTANCE.projectOutOfSubLevel(
+                                            this.level,
+                                            gunLocalPos,
+                                            new Vector3d()
+                                    );
+
+                            if (!positions.isEmpty()) {
+                                // 1. Get the target's global position.
+                                List<Double> target = getAllSubLevelPositions().get(0);
+
+                                Vector3d targetGlobal = new Vector3d(
+                                        target.get(0),
+                                        target.get(1),
+                                        target.get(2)
+                                );
+
+// 2. Get the sub-level containing the Chin Gun.
+                                SubLevelAccess gunSubLevel =
+                                        SableCompanion.INSTANCE.getContaining(chinGun);
+
+                                if (gunSubLevel != null) {
+                                    // 3. Convert the target from global to local coordinates.
+                                    // Use the inverse of the gun sub-level's logical pose.
+                                    gunSubLevel.logicalPose().transformPositionInverse(targetGlobal);
+
+                                    // 4. Calculate direction from the local gun position.
+                                    double dx = targetGlobal.x - (cgPos.getX() + 0.5);
+                                    double dy = targetGlobal.y - (cgPos.getY() + 0.5);
+                                    double dz = targetGlobal.z - (cgPos.getZ() + 0.5);
+
+                                    double horizontal = Math.sqrt(dx * dx + dz * dz);
+
+                                    float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                                    float pitch = (float) -Math.toDegrees(
+                                            Math.atan2(dy, horizontal)
+                                    );
+
+                                    chinGun.setYaw(yaw);
+                                    chinGun.setPitch(pitch);
+                                    chinGun.setFiring(true);
+                                    chinGun.setChanged();
+
+                                    //AeroComputers.LOGGER.info(target + "  ---  " + gunGlobalPos + "  ---  " + yaw + "  ---  " + pitch);
+
+                                    level.sendBlockUpdated(cgPos, chinGun.getBlockState(), chinGun.getBlockState(), 3);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+
+
 
         if (!subLevelSeenThisCycle) {
             currentSubLevel = null;
@@ -1492,6 +1599,14 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         setChanged();
         if (level != null && !level.isClientSide) {
             level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 3);
+        }
+    }
+
+    @Override
+    public void onLoad() {
+        super.onLoad();
+        if(this.level != null && !this.level.isClientSide()) {
+            restart();
         }
     }
 

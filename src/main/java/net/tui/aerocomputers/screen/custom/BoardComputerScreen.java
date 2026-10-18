@@ -609,9 +609,8 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
         int in = menu.blockEntity.getInputChannels().size();
         int out = menu.blockEntity.getOutputChannels().size();
 
-        // Detect a newly-created channel.
+        // Handle channel count changes and pending channel loads.
         if (in != lastInputChannelCount || out != lastOutputChannelCount) {
-
             boolean inputAdded = in > lastInputChannelCount;
             boolean outputAdded = out > lastOutputChannelCount;
 
@@ -680,19 +679,23 @@ public class BoardComputerScreen extends AbstractContainerScreen<BoardComputerMe
                 }
             }
 
-            // Existing panel update logic.
-            if (channelId != lastChannelUpdateId
-                    || variableId != lastVariableUpdateId
-                    || in != lastInputSize
-                    || out != lastOutputSize) {
+            // Keep your existing pendingChannelLoads handling here.
+            // Do not put the panel refresh check inside this block.
+        }
 
-                lastChannelUpdateId = channelId;
-                lastVariableUpdateId = variableId;
-                lastInputSize = in;
-                lastOutputSize = out;
+        // Refresh for channel changes, frequency/mode changes,
+        // and variable changes, even when channel counts stay the same.
+        if (channelId != lastChannelUpdateId
+                || variableId != lastVariableUpdateId
+                || in != lastInputSize
+                || out != lastOutputSize) {
 
-                rebuildPanel();
-            }
+            lastChannelUpdateId = channelId;
+            lastVariableUpdateId = variableId;
+            lastInputSize = in;
+            lastOutputSize = out;
+
+            rebuildPanel();
         }
 
         if (completionId != lastEditorCompletionUpdateId) {

@@ -30,6 +30,7 @@ public class HudOverlay implements LayeredDraw.Layer {
         String linkedName = tag.contains(HudEntryPayload.NBT_KEY) ? tag.getString(HudEntryPayload.NBT_KEY) : "";
 
         List<ClientHudRegistry.DrawEntry> entries = ClientHudRegistry.get(linkedName);
+        AeroComputers.LOGGER.info(entries.toString());
 
         for (ClientHudRegistry.DrawEntry e : entries) {
             switch (e.type()) {

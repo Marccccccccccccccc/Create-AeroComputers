@@ -1,4 +1,3 @@
-// new file: net/tui/aerocomputers/client/ClientHudRegistry.java
 package net.tui.aerocomputers.client;
 
 import java.util.List;

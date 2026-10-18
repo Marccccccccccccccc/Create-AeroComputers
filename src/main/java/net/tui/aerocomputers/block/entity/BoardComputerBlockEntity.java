@@ -67,13 +67,15 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         }
 
         for (SubLevel subLevel : container.getAllSubLevels()) {
-            Vector3d pos = subLevel.logicalPose().position();
+            if(subLevel != currentSubLevel) {
+                Vector3d pos = subLevel.logicalPose().position();
 
-            allPositions.add(List.of(
-                    round2(pos.x()),
-                    round2(pos.y()),
-                    round2(pos.z())
-            ));
+                allPositions.add(List.of(
+                        round2(pos.x()),
+                        round2(pos.y()),
+                        round2(pos.z())
+                ));
+            }
         }
 
         return allPositions;
@@ -476,6 +478,9 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                     round2(Math.toDegrees(euler.y)),
                     round2(Math.toDegrees(euler.z))
             );
+        });
+        builtins.put("radar", args -> {
+            return getAllSubLevelPositions();
         });
         builtins.put("round", args -> {
             if (args.isEmpty()) return 0.0;

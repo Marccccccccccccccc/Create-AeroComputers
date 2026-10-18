@@ -34,6 +34,12 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.tui.aerocomputers.AeroComputers;
+import net.tui.aerocomputers.lang.LanguageSpec;
+import net.tui.aerocomputers.lang.Lexer;
+import net.tui.aerocomputers.lang.ProgramAnalyzer;
+import net.tui.aerocomputers.lang.ProgramInfo;
+import net.tui.aerocomputers.lang.Token;
+import net.tui.aerocomputers.lang.TokenType;
 import net.tui.aerocomputers.screen.custom.BoardComputerMenu;
 import org.apache.commons.lang3.tuple.Pair;
 import org.jetbrains.annotations.Nullable;
@@ -85,8 +91,9 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
     private final Map<Integer, Integer> blockEnd = new HashMap<>();   // if/while/for start -> matching end
     private final Map<Integer, Integer> loopStart = new HashMap<>();  // endwhile/endfor -> matching start
     private String[] programLines = new String[0];
+    private String[] firstWords = new String[0];                      // first identifier of each line (from the shared lexer)
 
-    private final Map<String, FunctionDef> functions = new HashMap<>();
+    private final Map<String, ProgramInfo.FunctionInfo> functions = new HashMap<>();
     private final Deque<Map<String, Object>> scopeStack = new ArrayDeque<>();
     private int callDepth = 0;
 
@@ -97,9 +104,6 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
     private @Nullable SubLevel currentSubLevel;
     private boolean subLevelSeenThisCycle = false;
-
-    private record ParamDef(String name, String defaultExpr) {} // defaultExpr is null if no default
-    private record FunctionDef(int startLine, int endLine, List<ParamDef> params) {}
 
     private boolean running = true;
 
@@ -126,17 +130,12 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
     private LinkBehaviour[] inputLinks;
     private LinkBehaviour[] outputLinks;
 
-    private static class ClassDef {
-        String name;
-        Map<String, FunctionDef> methods = new HashMap<>();
-    }
-
     private static class Instance {
         String className;
         Map<String, Object> fields = new LinkedHashMap<>();
     }
 
-    private final Map<String, ClassDef> classes = new HashMap<>();
+    private final Map<String, ProgramInfo.ClassInfo> classes = new HashMap<>();
 
     private interface NativeInstance {
         Object getField(String name);
@@ -177,31 +176,6 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
     public int getEditorCompletionUpdateId() {
         return editorCompletionUpdateId;
     }
-
-    private static final Map<String, List<String>> BUILTIN_FUNCTION_PARAMS = Map.ofEntries(
-            Map.entry("print", List.of("text")),
-            Map.entry("sqrt", List.of("value")),
-            Map.entry("sin", List.of("degrees")),
-            Map.entry("cos", List.of("degrees")),
-            Map.entry("asin", List.of("value")),
-            Map.entry("acos", List.of("value")),
-            Map.entry("abs", List.of("value")),
-            Map.entry("round", List.of("value")),
-            Map.entry("ceil", List.of("value")),
-            Map.entry("floor", List.of("value")),
-            Map.entry("min", List.of("a", "b")),
-            Map.entry("max", List.of("a", "b")),
-            Map.entry("getPos", List.of()),
-            Map.entry("getRot", List.of()),
-            Map.entry("getVel", List.of())
-    );
-
-    private static final Map<String, List<String>> BUILTIN_CLASS_PARAMS = Map.of(
-            "Label", List.of("x", "y", "text", "color", "font_size"),
-            "Line", List.of("x1", "y1", "x2", "y2", "width", "color"),
-            "Rect", List.of("x", "y", "w", "h", "border_width", "center_color", "border_color", "render_center", "render_border"),
-            "Poly", List.of("xs", "ys", "border_width", "center_color", "border_color", "render_center", "render_border")
-    );
 
     public BoardComputerBlockEntity(BlockPos pos, BlockState blockState) {
         super(ModBlockEntitys.BOARDCOMPUTER_BE.get(), pos, blockState);
@@ -582,8 +556,9 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
             obj.y = args.size() > 1 ? toNumber(args.get(1)) : 0;
             obj.x2 = args.size() > 2 ? toNumber(args.get(2)) : 0;
             obj.y2 = args.size() > 3 ? toNumber(args.get(3)) : 0;
-            obj.color = toColorList(args.size() > 4 ? args.get(5) : null);
-            obj.width = args.size() > 5 ? toNumber(args.get(4)) : 1.0;
+            // parameter order: x1, y1, x2, y2, width, color
+            obj.width = args.size() > 4 ? toNumber(args.get(4)) : 1.0;
+            obj.color = toColorList(args.size() > 5 ? args.get(5) : null);
             drawObjects.add(obj);
             markDrawDirty();
             return wrapDrawObject(obj);
@@ -763,11 +738,11 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
     private Object callFunction(String name, CallArgs callArgs) {
         if (builtins.containsKey(name)) {
-            List<String> paramNames = BUILTIN_FUNCTION_PARAMS.getOrDefault(name, List.of());
+            List<String> paramNames = LanguageSpec.BUILTIN_FUNCTIONS.getOrDefault(name, List.of());
             return builtins.get(name).apply(resolveArgs(paramNames, callArgs));
         }
 
-        FunctionDef def = functions.get(name);
+        ProgramInfo.FunctionInfo def = functions.get(name);
         if (def == null) {
             AeroComputers.LOGGER.warn("Call to undefined function: {}", name);
             return 0.0;
@@ -790,23 +765,11 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
         try {
             while (line < def.endLine() && iterations < MAX_FUNCTION_ITERATIONS) {
-                String text = programLines[line].trim();
+                String text = stripComment(programLines[line].trim());
                 iterations++;
 
-                if (text.startsWith("return")) {
-                    String expr = text.length() > 6 ? text.substring(6).trim() : "";
-                    if (expr.isEmpty()) {
-                        returnValue = 0.0;
-                    } else {
-                        List<String> parts = splitTopLevel(expr, ',');
-                        if (parts.size() > 1) {
-                            List<Object> vals = new ArrayList<>();
-                            for (String p : parts) vals.add(evaluateExpression(p.trim()));
-                            returnValue = vals;
-                        } else {
-                            returnValue = evaluateExpression(expr);
-                        }
-                    }
+                if (isReturnLine(line)) {
+                    returnValue = evaluateReturn(text);
                     break;
                 }
 
@@ -818,6 +781,26 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         }
 
         return returnValue;
+    }
+
+    private boolean isReturnLine(int line) {
+        return line >= 0 && line < firstWords.length && firstWords[line].equals("return");
+    }
+
+    private Object evaluateReturn(String text) {
+        String expr = text.length() > 6 ? text.substring(6).trim() : "";
+        if (expr.isEmpty()) {
+            return 0.0;
+        }
+
+        List<String> parts = splitTopLevel(expr, ',');
+        if (parts.size() > 1) {
+            List<Object> vals = new ArrayList<>();
+            for (String p : parts) vals.add(evaluateExpression(p.trim()));
+            return vals;
+        }
+
+        return evaluateExpression(expr);
     }
 
     private Object getVar(String name) {
@@ -851,92 +834,49 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         variables.remove(name);
     }
 
+    /**
+     * Uses the shared analyzer (the same one the editor uses) to find blocks,
+     * functions and classes.
+     */
     private void compileBlocks() {
-        blockEnd.clear();
-        loopStart.clear();
         forCounters.clear();
         forLists.clear();
         variables.clear();
-        functions.clear();
-        classes.clear();
         scopeStack.clear();
         scopeStack.push(variables);
         lineIndex = 0;
 
-        programLines = program.split("\n", -1);
+        ProgramInfo info = ProgramAnalyzer.analyze(program);
 
-        Deque<int[]> stack = new ArrayDeque<>(); // {lineIndex, type} 0=if,1=loop,2=def,3=class
+        programLines = info.lines();
+        firstWords = info.firstWords();
 
-        for (int i = 0; i < programLines.length; i++) {
-            String trimmed = programLines[i].trim();
+        blockEnd.clear();
+        blockEnd.putAll(info.blockEnd());
 
-            if (trimmed.startsWith("class")) stack.push(new int[]{i, 3});
-            else if (trimmed.startsWith("if")) stack.push(new int[]{i, 0});
-            else if (trimmed.startsWith("while")) stack.push(new int[]{i, 1});
-            else if (trimmed.startsWith("for")) stack.push(new int[]{i, 1});
-            else if (trimmed.startsWith("def")) stack.push(new int[]{i, 2});
-            else if (trimmed.equals("endif") || trimmed.equals("endwhile")
-                    || trimmed.equals("endfor") || trimmed.equals("enddef")
-                    || trimmed.equals("endclass")) {
-                if (!stack.isEmpty()) {
-                    int[] start = stack.pop();
-                    blockEnd.put(start[0], i);
-                    if (start[1] == 1) {
-                        loopStart.put(i, start[0]);
-                    } else if (start[1] == 2) {
-                        int[] parent = stack.peek();
-                        if (parent != null && parent[1] == 3) {
-                            registerMethod(parent[0], start[0], i);
-                        } else {
-                            registerFunction(start[0], i);
-                        }
-                    } else if (start[1] == 3) {
-                        String className = extractClassName(programLines[start[0]]);
-                        classes.computeIfAbsent(className, k -> {
-                            ClassDef cd = new ClassDef();
-                            cd.name = k;
-                            return cd;
-                        });
-                    }
-                }
+        loopStart.clear();
+        loopStart.putAll(info.loopStart());
+
+        functions.clear();
+        functions.putAll(info.functions());
+
+        classes.clear();
+        classes.putAll(info.classes());
+    }
+
+    /** Removes a trailing "# comment" (using the shared lexer, so '#' inside strings is kept). */
+    private static String stripComment(String line) {
+        if (line.indexOf('#') < 0) {
+            return line;
+        }
+
+        for (Token t : Lexer.lex(line)) {
+            if (t.type() == TokenType.COMMENT) {
+                return line.substring(0, t.start()).trim();
             }
         }
-    }
 
-    private void registerMethod(int classLine, int startLine, int endLine) {
-        String header = programLines[startLine].trim();
-        int space = header.indexOf(' ');
-        int open = header.indexOf('(');
-        int close = header.indexOf(')');
-        if (space == -1 || open == -1 || close == -1 || open < space) return;
-
-        String methodName = header.substring(space + 1, open).trim();
-        String argsStr = header.substring(open + 1, close).trim();
-
-        String className = programLines[classLine].trim().substring(5).trim();
-        ClassDef cd = classes.computeIfAbsent(className, k -> {
-            ClassDef c = new ClassDef();
-            c.name = k;
-            return c;
-        });
-        cd.methods.put(methodName, new FunctionDef(startLine, endLine, parseParamDefs(argsStr)));
-    }
-
-    private void registerFunction(int startLine, int endLine) {
-        String header = programLines[startLine].trim();
-        int space = header.indexOf(' ');
-        int open = header.indexOf('(');
-        int close = header.indexOf(')');
-
-        if (space == -1 || open == -1 || close == -1 || open < space) {
-            AeroComputers.LOGGER.warn("Malformed function definition: {}", header);
-            return;
-        }
-
-        String name = header.substring(space + 1, open).trim();
-        String argsStr = header.substring(open + 1, close).trim();
-
-        functions.put(name, new FunctionDef(startLine, endLine, parseParamDefs(argsStr)));
+        return line;
     }
 
 
@@ -953,16 +893,21 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
     private int executeLine(String line, int index) {
         try {
-            if (line.isEmpty() || line.startsWith("#")) {
+            line = stripComment(line);
+
+            if (line.isEmpty()) {
                 return index + 1;
             }
 
-            if (line.startsWith("print")) {
+            // Same first word the analyzer / editor used for this line
+            String kw = (index >= 0 && index < firstWords.length) ? firstWords[index] : "";
+
+            if (kw.equals("print")) {
                 printLine(line);
                 return index + 1;
             }
 
-            if (line.startsWith("if")) {
+            if (kw.equals("if")) {
                 boolean result = evaluateCondition(extractCondition(line, "if"));
                 Integer end = blockEnd.get(index);
                 return (!result && end != null) ? end + 1 : index + 1;
@@ -972,7 +917,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                 return index + 1;
             }
 
-            if (line.startsWith("while")) {
+            if (kw.equals("while")) {
                 boolean result = evaluateCondition(extractCondition(line, "while"));
                 Integer end = blockEnd.get(index);
                 return (!result && end != null) ? end + 1 : index + 1;
@@ -983,7 +928,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                 return start != null ? start : index + 1;
             }
 
-            if (line.startsWith("for")) {
+            if (kw.equals("for")) {
                 String[] parts = line.trim().split("\\s+", 4);
                 if (parts.length < 4 || !parts[2].equals("in")) {
                     return index + 1;
@@ -1035,7 +980,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                 return index + 1;
             }
 
-            if (line.startsWith("def")) {
+            if (kw.equals("def")) {
                 Integer end = blockEnd.get(index);
                 return end != null ? end + 1 : index + 1; // skip body during linear execution
             }
@@ -1044,7 +989,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                 return index + 1;
             }
 
-            if (line.startsWith("class")) {
+            if (kw.equals("class")) {
                 Integer end = blockEnd.get(index);
                 return end != null ? end + 1 : index + 1; // skip class body
             }
@@ -1053,7 +998,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                 return index + 1;
             }
 
-            if (line.startsWith("return")) {
+            if (kw.equals("return")) {
                 return index + 1; // no-op if reached outside a function call
             }
 
@@ -1124,14 +1069,19 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
                 if (bracketOpen > 0 && bracketClose > bracketOpen && eq > bracketClose) {
                     String varName = line.substring(0, bracketOpen).trim();
-                    String indexExpr = line.substring(bracketOpen + 1, bracketClose).trim();
-                    String valueExpr = line.substring(eq + 1).trim();
 
-                    int idx = (int) evaluateNumeric(indexExpr);
-                    Object value = evaluateExpression(valueExpr);
+                    // only a real assignment if the left side is a plain variable name
+                    // (otherwise it's something like dummy(list[0], x=1))
+                    if (varName.matches("^[A-Za-z_][A-Za-z0-9_]*$")) {
+                        String indexExpr = line.substring(bracketOpen + 1, bracketClose).trim();
+                        String valueExpr = line.substring(eq + 1).trim();
 
-                    setIndex(varName, idx, value);
-                    return index + 1;
+                        int idx = (int) evaluateNumeric(indexExpr);
+                        Object value = evaluateExpression(valueExpr);
+
+                        setIndex(varName, idx, value);
+                        return index + 1;
+                    }
                 }
             }
 
@@ -1171,11 +1121,18 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
             }
 
 
+            // plain assignment: name = expr
             if (line.contains("=") && !line.contains("==") && !line.contains("!=")
                     && !line.contains(">=") && !line.contains("<=")) {
                 String[] split = line.split("=", 2);
-                setVar(split[0].trim(), evaluateExpression(split[1].trim()));
-                return index + 1;
+                String lhs = split[0].trim();
+
+                // only a real assignment if the left side is a plain variable name
+                // (otherwise it's something like dummy(x=1), a call with a named argument)
+                if (lhs.matches("^[A-Za-z_][A-Za-z0-9_]*$")) {
+                    setVar(lhs, evaluateExpression(split[1].trim()));
+                    return index + 1;
+                }
             }
 
             // bare expression statement, e.g. a function call or method call used only for its side effects
@@ -1236,7 +1193,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         toks = savedToks;
         pos = savedPos;
 
-        List<Object> resolved = resolveArgs(BUILTIN_FUNCTION_PARAMS.getOrDefault("print", List.of("text")), callArgs);
+        List<Object> resolved = resolveArgs(LanguageSpec.BUILTIN_FUNCTIONS.getOrDefault("print", List.of("text")), callArgs);
         Object result = resolved.isEmpty() ? "" : resolved.get(0);
 
         String message = stringify(result);
@@ -1321,57 +1278,25 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         return rest;
     }
 
+    /**
+     * Expression tokenizer. Uses the shared lossless lexer and just drops what the
+     * expression parser doesn't care about.
+     */
     private List<String> tokenize(String expr) {
         List<String> tokens = new ArrayList<>();
-        int i = 0;
-        while (i < expr.length()) {
-            char c = expr.charAt(i);
-            if (Character.isWhitespace(c)) { i++; continue; }
-            if (c == '"') {
-                int j = i + 1;
-                while (j < expr.length() && expr.charAt(j) != '"') j++;
-                tokens.add(expr.substring(i, Math.min(j + 1, expr.length())));
-                i = j + 1;
-                continue;
-            }
 
-            if (c == '*' && i + 1 < expr.length() && expr.charAt(i + 1) == '*') {
-                tokens.add("**");
-                i += 2;
-                continue;
+        for (Token t : Lexer.lex(expr)) {
+            switch (t.type()) {
+                case WHITESPACE, COMMENT, UNKNOWN -> { }
+                default -> {
+                    String text = t.text();
+                    if (!text.equals("{") && !text.equals("}")) {
+                        tokens.add(text);
+                    }
+                }
             }
-
-            if (Character.isDigit(c) || (c == '.' && i + 1 < expr.length() && Character.isDigit(expr.charAt(i + 1)))) {
-                int j = i;
-                while (j < expr.length() && (Character.isDigit(expr.charAt(j)) || expr.charAt(j) == '.')) j++;
-                tokens.add(expr.substring(i, j));
-                i = j;
-                continue;
-            }
-            if (Character.isLetter(c) || c == '_') {
-                int j = i;
-                while (j < expr.length() && (Character.isLetterOrDigit(expr.charAt(j)) || expr.charAt(j) == '_')) j++;
-                tokens.add(expr.substring(i, j));
-                i = j;
-                continue;
-            }
-            if ("<>=!".indexOf(c) != -1 && i + 1 < expr.length() && expr.charAt(i + 1) == '=') {
-                tokens.add(expr.substring(i, i + 2));
-                i += 2;
-                continue;
-            }
-            if (c == '=') {
-                tokens.add("=");
-                i++;
-                continue;
-            }
-            if ("+-*/()<>[],%.".indexOf(c) != -1) {
-                tokens.add(String.valueOf(c));
-                i++;
-                continue;
-            }
-            i++;
         }
+
         tokens.add("");
         return tokens;
     }
@@ -1531,7 +1456,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
             CallArgs callArgs = parseCallArgs();
 
             if (nativeClasses.containsKey(tok)) {
-                List<String> paramNames = BUILTIN_CLASS_PARAMS.getOrDefault(tok, List.of());
+                List<String> paramNames = LanguageSpec.NATIVE_CLASSES.getOrDefault(tok, List.of());
                 return nativeClasses.get(tok).create(resolveArgs(paramNames, callArgs));
             }
             if (classes.containsKey(tok)) {
@@ -1706,6 +1631,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                 ch.slot = slotIndex;
                 ch.variableName = "input" + slotIndex;
                 inputChannels.add(ch);
+                editorCompletionUpdateId++;
                 setChanged();
                 sync();
                 return ch;
@@ -1724,6 +1650,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
                 ch.slot = slotIndex;
                 ch.variableName = "output" + slotIndex;
                 outputChannels.add(ch);
+                editorCompletionUpdateId++;
                 setChanged();
                 sync();
                 return ch;
@@ -1738,6 +1665,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
             inputLinks[c.slot].setFrequency(false, ItemStack.EMPTY);
         });
         inputChannels.removeIf(c -> c.id.equals(id));
+        editorCompletionUpdateId++;
         setChanged();
         sync();
     }
@@ -1748,6 +1676,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
             outputLinks[c.slot].setFrequency(false, ItemStack.EMPTY);
         });
         outputChannels.removeIf(c -> c.id.equals(id));
+        editorCompletionUpdateId++;
         setChanged();
         sync();
     }
@@ -1763,12 +1692,14 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
     public void setInputChannelName(String id, String name) {
         editChannel(inputChannels, id, c -> c.variableName = name);
+        editorCompletionUpdateId++;
         setChanged();
         sync();
     }
 
     public void setOutputChannelName(String id, String name) {
         editChannel(outputChannels, id, c -> c.variableName = name);
+        editorCompletionUpdateId++;
         setChanged();
         sync();
     }
@@ -1893,6 +1824,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
     public void channelsChanged() {
         channelUpdateId++;
+        editorCompletionUpdateId++;
         setChanged();
         sync();
     }
@@ -1961,11 +1893,12 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
     private void variablesChanged() {
         variableUpdateId++;
+        editorCompletionUpdateId++;
         setChanged();
         sync();
     }
 
-    private Object callMethod(Instance self, FunctionDef def, CallArgs callArgs) {
+    private Object callMethod(Instance self, ProgramInfo.FunctionInfo def, CallArgs callArgs) {
         if (callDepth >= MAX_CALL_DEPTH) {
             AeroComputers.LOGGER.error("Max call depth exceeded calling method");
             return 0.0;
@@ -1984,23 +1917,11 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
 
         try {
             while (line < def.endLine() && iterations < MAX_FUNCTION_ITERATIONS) {
-                String text = programLines[line].trim();
+                String text = stripComment(programLines[line].trim());
                 iterations++;
 
-                if (text.startsWith("return")) {
-                    String expr = text.length() > 6 ? text.substring(6).trim() : "";
-                    if (expr.isEmpty()) {
-                        returnValue = 0.0;
-                    } else {
-                        List<String> parts = splitTopLevel(expr, ',');
-                        if (parts.size() > 1) {
-                            List<Object> vals = new ArrayList<>();
-                            for (String p : parts) vals.add(evaluateExpression(p.trim()));
-                            returnValue = vals;
-                        } else {
-                            returnValue = evaluateExpression(expr);
-                        }
-                    }
+                if (isReturnLine(line)) {
+                    returnValue = evaluateReturn(text);
                     break;
                 }
 
@@ -2193,32 +2114,9 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         sync();
     }
 
-    private List<ParamDef> parseParamDefs(String argsStr) {
-        if (argsStr.isEmpty()) return List.of();
-        List<ParamDef> result = new ArrayList<>();
-        for (String raw : splitTopLevel(argsStr, ',')) {
-            String trimmed = raw.trim();
-            int eq = trimmed.indexOf('=');
-            if (eq == -1) {
-                result.add(new ParamDef(trimmed, null));
-            } else {
-                result.add(new ParamDef(trimmed.substring(0, eq).trim(), trimmed.substring(eq + 1).trim()));
-            }
-        }
-        return result;
-    }
-
     private static class CallArgs {
         final List<Object> positional = new ArrayList<>();
         final Map<String, Object> named = new LinkedHashMap<>();
-    }
-
-    private String extractClassName(String header) {
-        String name = header.trim().substring(5).trim();
-        if (name.endsWith("()")) {
-            name = name.substring(0, name.length() - 2).trim();
-        }
-        return name;
     }
 
     private CallArgs parseCallArgs() {
@@ -2254,10 +2152,10 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         result.positional.add(parseOr());
     }
 
-    private void bindParams(List<ParamDef> params, int skipFirst, CallArgs callArgs, Map<String, Object> frame) {
+    private void bindParams(List<ProgramInfo.ParamInfo> params, int skipFirst, CallArgs callArgs, Map<String, Object> frame) {
         int posIndex = 0;
         for (int i = skipFirst; i < params.size(); i++) {
-            ParamDef p = params.get(i);
+            ProgramInfo.ParamInfo p = params.get(i);
             if (callArgs.named.containsKey(p.name())) {
                 frame.put(p.name(), callArgs.named.get(p.name()));
             } else if (posIndex < callArgs.positional.size()) {
@@ -2272,11 +2170,11 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
     }
 
     private Instance instantiate(String className, CallArgs callArgs) {
-        ClassDef cd = classes.get(className);
+        ProgramInfo.ClassInfo cd = classes.get(className);
         Instance inst = new Instance();
         inst.className = className;
 
-        FunctionDef init = cd.methods.get("__init__");
+        ProgramInfo.FunctionInfo init = cd.methods().get("__init__");
         if (init != null) {
             callMethod(inst, init, callArgs);
         }
@@ -2284,10 +2182,10 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
     }
 
     private Object callInstanceMethod(Instance inst, String methodName, CallArgs callArgs) {
-        ClassDef cd = classes.get(inst.className);
+        ProgramInfo.ClassInfo cd = classes.get(inst.className);
         if (cd == null) return 0.0;
 
-        FunctionDef method = cd.methods.get(methodName);
+        ProgramInfo.FunctionInfo method = cd.methods().get(methodName);
         if (method == null) {
             AeroComputers.LOGGER.warn("No such method {} on class {}", methodName, inst.className);
             return 0.0;
@@ -2296,74 +2194,18 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
     }
 
 
+    /**
+     * The editor derives functions/classes/variables from the program text itself
+     * (via the shared ProgramAnalyzer). The only thing it cannot know is what lives
+     * outside the text: persistent variables and channel variable names.
+     */
     public EditorCompletions getEditorCompletions() {
-        Set<String> variableNames = new LinkedHashSet<>(persistentVariables.keySet());
+        Set<String> extra = new LinkedHashSet<>(persistentVariables.keySet());
 
-        for (String line : programLines) {
-            String trimmed = line.trim();
-            if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+        addChannelVariables(extra, inputChannels);
+        addChannelVariables(extra, outputChannels);
 
-            if (trimmed.contains("=") && !trimmed.contains("==") && !trimmed.contains("!=")
-                    && !trimmed.contains(">=") && !trimmed.contains("<=")
-                    && !trimmed.contains(".") && !trimmed.contains("[")) {
-
-                String left = trimmed.substring(0, trimmed.indexOf('=')).trim();
-
-                if (left.matches("^[A-Za-z_][A-Za-z0-9_]*$")) {
-                    variableNames.add(left);
-                } else if (left.matches("^[A-Za-z_][A-Za-z0-9_]*(\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*)+$")) {
-                    for (String name : left.split("\\s*,\\s*")) {
-                        variableNames.add(name.trim());
-                    }
-                }
-            }
-        }
-
-        addChannelVariables(variableNames, inputChannels);
-        addChannelVariables(variableNames, outputChannels);
-
-        Map<String, List<String>> classMethods = new LinkedHashMap<>();
-        Map<String, List<String>> callableParams = new LinkedHashMap<>();
-
-        for (var entry : classes.entrySet()) {
-            List<String> methodNames = new ArrayList<>(entry.getValue().methods.keySet());
-            classMethods.put(entry.getKey(), methodNames);
-
-            for (var methodEntry : entry.getValue().methods.entrySet()) {
-                List<String> paramNames = methodEntry.getValue().params().stream()
-                        .map(ParamDef::name)
-                        .filter(n -> !n.equals("self"))
-                        .toList();
-                callableParams.put(methodEntry.getKey(), paramNames);
-            }
-
-            // register constructor params under the class name too, so "ClassName(" shows __init__'s args
-            FunctionDef initDef = entry.getValue().methods.get("__init__");
-            if (initDef != null) {
-                List<String> initParams = initDef.params().stream()
-                        .map(ParamDef::name)
-                        .filter(n -> !n.equals("self"))
-                        .toList();
-                callableParams.put(entry.getKey(), initParams);
-            }
-        }
-
-        for (var entry : functions.entrySet()) {
-            List<String> paramNames = entry.getValue().params().stream()
-                    .map(ParamDef::name)
-                    .toList();
-            callableParams.put(entry.getKey(), paramNames);
-        }
-
-        return new EditorCompletions(
-                List.copyOf(variableNames),
-                List.copyOf(functions.keySet()),
-                List.copyOf(classes.keySet()),
-                List.copyOf(builtins.keySet()),
-                List.copyOf(nativeClasses.keySet()),
-                classMethods,
-                callableParams
-        );
+        return new EditorCompletions(List.copyOf(extra));
     }
 
     private static void addChannelVariables(
@@ -2377,15 +2219,7 @@ public class BoardComputerBlockEntity extends KineticBlockEntity implements Menu
         }
     }
 
-    public record EditorCompletions(
-            List<String> variables,
-            List<String> functions,
-            List<String> classes,
-            List<String> builtins,
-            List<String> nativeClasses,
-            Map<String, List<String>> classMethods,      // class name -> method names
-            Map<String, List<String>> callableParams     // function/method name -> param names
-    ) {}
+    public record EditorCompletions(List<String> extraVariables) {}
 
 
 

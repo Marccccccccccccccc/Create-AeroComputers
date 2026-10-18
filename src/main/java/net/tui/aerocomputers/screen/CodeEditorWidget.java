@@ -5,8 +5,13 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.network.chat.Component;
-import net.tui.aerocomputers.AeroComputers;
 import net.tui.aerocomputers.block.entity.BoardComputerBlockEntity;
+import net.tui.aerocomputers.lang.LanguageSpec;
+import net.tui.aerocomputers.lang.Lexer;
+import net.tui.aerocomputers.lang.ProgramAnalyzer;
+import net.tui.aerocomputers.lang.ProgramInfo;
+import net.tui.aerocomputers.lang.Token;
+import net.tui.aerocomputers.lang.TokenType;
 
 import java.util.*;
 import java.util.function.Consumer;
@@ -48,51 +53,6 @@ public class CodeEditorWidget extends AbstractWidget {
     private static final int COLOR_BRACKET = 0xFFF1D70B;
     private static final int COLOR_COMMENT = 0xFF6A9955;
 
-    private static final Set<String> CONTROL_KEYWORDS = Set.of(
-            "if",
-            "endif",
-            "while",
-            "endwhile",
-            "for",
-            "endfor"
-    );
-
-    private static final Set<String> DECLARATION_KEYWORDS = Set.of(
-            "def",
-            "enddef",
-            "class",
-            "endclass",
-            "and",
-            "or",
-            "true",
-            "false"
-    );
-
-    private static final Set<String> BUILTIN_FUNCTIONS = Set.of(
-            "print",
-            "getPos",
-            "getRot",
-            "getVel",
-            "sqrt",
-            "sin",
-            "cos",
-            "asin",
-            "acos",
-            "abs",
-            "min",
-            "max",
-            "round",
-            "ceil",
-            "floor"
-    );
-
-    private static final Set<String> BUILTIN_CLASSES = Set.of(
-            "Label",
-            "Line",
-            "Rect",
-            "Poly"
-    );
-
     private boolean autocompleteOpen = false;
     private final List<String> autocompleteSuggestions = new ArrayList<>();
     private int autocompleteIndex = 0;
@@ -104,48 +64,17 @@ public class CodeEditorWidget extends AbstractWidget {
     private static final int AUTOCOMPLETE_WIDTH = 140;
     private static final int AUTOCOMPLETE_ITEM_HEIGHT = 12;
 
-    private List<String> variables;
-    private List<String> functions;
-    private List<String> classes;
-    private List<String> builtins;
-    private List<String> nativeClasses;
-    private Map<String, List<String>> classMethods;
-    private Map<String, List<String>> callableParams;
-
-    // Server-provided baseline, refreshed only via updateCompletions(...) from the real block entity state
-    private List<String> serverVariables = List.of();
-    private List<String> serverFunctions = List.of();
-    private List<String> serverClasses = List.of();
-    private Map<String, List<String>> serverClassMethods = Map.of();
-    private Map<String, List<String>> serverCallableParams = Map.of();
+    // Everything below is derived from the program text by the SAME analyzer the interpreter uses.
+    private ProgramInfo info = ProgramAnalyzer.analyze("");
+    private List<String> extraVariables = List.of();   // persistent vars + channel names, supplied by the server
+    private List<String> variables = List.of();
+    private List<String> functions = List.of();
+    private List<String> classes = List.of();
+    private Map<String, List<String>> classMethods = Map.of();
+    private Map<String, List<String>> callableParams = Map.of();
 
     private enum AutocompleteMode { NORMAL, METHOD, PARAM }
     private AutocompleteMode autocompleteMode = AutocompleteMode.NORMAL;
-
-    private static final Map<String, List<String>> BUILTIN_FUNCTION_PARAMS = Map.ofEntries(
-            Map.entry("print", List.of("text")),
-            Map.entry("sqrt", List.of("value")),
-            Map.entry("sin", List.of("degrees")),
-            Map.entry("cos", List.of("degrees")),
-            Map.entry("asin", List.of("value")),
-            Map.entry("acos", List.of("value")),
-            Map.entry("abs", List.of("value")),
-            Map.entry("round", List.of("value")),
-            Map.entry("ceil", List.of("value")),
-            Map.entry("floor", List.of("value")),
-            Map.entry("min", List.of("a", "b")),
-            Map.entry("max", List.of("a", "b")),
-            Map.entry("getPos", List.of()),
-            Map.entry("getRot", List.of()),
-            Map.entry("getVel", List.of())
-    );
-
-    private static final Map<String, List<String>> BUILTIN_CLASS_PARAMS = Map.of(
-            "Label", List.of("x", "y", "text", "color", "font_size"),
-            "Line", List.of("x1", "y1", "x2", "y2", "width", "color"),
-            "Rect", List.of("x", "y", "width", "height", "border_width", "center_color", "border_color", "render_center", "render_border"),
-            "Poly", List.of("xs", "ys", "width", "color")
-    );
 
     public static final Map<String, String> HELP_LOOKUP = Map.ofEntries(
             Map.entry("if", "help.aero.if.text"),
@@ -204,28 +133,14 @@ public class CodeEditorWidget extends AbstractWidget {
         super(x, y, width, height, Component.empty());
         lines.addAll(List.of(text.split("\n", -1)));
 
-        this.serverVariables = completions.variables();
-        this.serverFunctions = completions.functions();
-        this.serverClasses = completions.classes();
-        this.serverClassMethods = completions.classMethods();
-        this.serverCallableParams = completions.callableParams();
-
-        this.builtins = completions.builtins();
-        this.nativeClasses = completions.nativeClasses();
+        this.extraVariables = completions.extraVariables();
         this.helpCallback = helpCallback;
 
         rescanLocalCompletions();
     }
 
     public void updateCompletions(BoardComputerBlockEntity.EditorCompletions completions) {
-        this.serverVariables = completions.variables();
-        this.serverFunctions = completions.functions();
-        this.serverClasses = completions.classes();
-        this.serverClassMethods = completions.classMethods();
-        this.serverCallableParams = completions.callableParams();
-
-        this.builtins = completions.builtins();
-        this.nativeClasses = completions.nativeClasses();
+        this.extraVariables = completions.extraVariables();
 
         rescanLocalCompletions();
         updateAutocomplete();
@@ -251,7 +166,7 @@ public class CodeEditorWidget extends AbstractWidget {
                 getY() + height,
                 0xFF101010
         );
-        
+
 
         guiGraphics.fill(
                 getX(),
@@ -284,7 +199,7 @@ public class CodeEditorWidget extends AbstractWidget {
         }
 
         guiGraphics.disableScissor();
-        
+
 
 
 
@@ -342,15 +257,16 @@ public class CodeEditorWidget extends AbstractWidget {
                         selectionY + lineHeight - scrollY,
                         0xFF3366AA
                 );
-                
+
             }
         }
 
 
-        // Draw text
-        // Draw syntax-highlighted text
-        
-        for (int i = 0; i < lines.size(); i++) {
+        // Draw syntax-highlighted text (only the lines that are actually visible)
+        int firstVisible = Math.max(0, scrollY / lineHeight - 1);
+        int lastVisible = Math.min(lines.size() - 1, (scrollY + height) / lineHeight + 1);
+
+        for (int i = firstVisible; i <= lastVisible; i++) {
 
             drawHighlightedLine(
                     guiGraphics,
@@ -363,7 +279,7 @@ public class CodeEditorWidget extends AbstractWidget {
         }
 
         guiGraphics.disableScissor();
-        
+
 
         // Draw cursor
         if (isFocused()) {
@@ -428,13 +344,13 @@ public class CodeEditorWidget extends AbstractWidget {
                 }
 
                 int color = COLOR_NORMAL;
-                if (CONTROL_KEYWORDS.contains(suggestion)) {
+                if (LanguageSpec.CONTROL_KEYWORDS.contains(suggestion)) {
                     color = COLOR_CONTROL_KEYWORD;
-                } else if (DECLARATION_KEYWORDS.contains(suggestion)) {
+                } else if (LanguageSpec.DECLARATION_KEYWORDS.contains(suggestion)) {
                     color = COLOR_DECLARATION_KEYWORD;
-                } else if (BUILTIN_FUNCTIONS.contains(suggestion) || functions.contains(suggestion) || builtins.contains(suggestion)) {
+                } else if (LanguageSpec.BUILTIN_FUNCTIONS.containsKey(suggestion) || functions.contains(suggestion)) {
                     color = COLOR_FUNCTION;
-                } else if (BUILTIN_CLASSES.contains(suggestion) || classes.contains(suggestion) || nativeClasses.contains(suggestion)) {
+                } else if (LanguageSpec.NATIVE_CLASSES.containsKey(suggestion) || classes.contains(suggestion)) {
                     color = COLOR_CLASS;
                 } else if (variables.contains(suggestion)) {
                     color = COLOR_VARIABLE;
@@ -607,12 +523,6 @@ public class CodeEditorWidget extends AbstractWidget {
 
                 return true;
             }
-        }
-
-        if (!isMouseOver(mouseX, mouseY)) {
-            setFocused(false);
-            clearSelection();
-            return false;
         }
 
         if (!isMouseOver(mouseX, mouseY)) {
@@ -1431,6 +1341,16 @@ public class CodeEditorWidget extends AbstractWidget {
     public void setText(String text) {
         lines.clear();
         lines.addAll(List.of(text.split("\n", -1)));
+
+        // keep the cursor valid for the new text
+        cursorLine = Math.min(cursorLine, lines.size() - 1);
+        cursorColumn = Math.min(cursorColumn, lines.get(cursorLine).length());
+        clearSelection();
+        closeAutocomplete();
+
+        // otherwise highlighting would use the analysis of the previous text
+        rescanLocalCompletions();
+        clampScroll();
     }
 
     @Override
@@ -1606,6 +1526,10 @@ public class CodeEditorWidget extends AbstractWidget {
     }
 
 
+    // =========================================================
+    // SYNTAX HIGHLIGHTING (shared lexer + analyzer)
+    // =========================================================
+
     private void drawHighlightedLine(
             GuiGraphics graphics,
             Minecraft mc,
@@ -1614,253 +1538,103 @@ public class CodeEditorWidget extends AbstractWidget {
             int y,
             int lineIndex
     ) {
+        List<Token> tokens = Lexer.lex(line);
         int drawX = x;
 
-        int i = 0;
+        for (int t = 0; t < tokens.size(); t++) {
+            Token tok = tokens.get(t);
+            int tokenWidth = mc.font.width(tok.text());
 
-        while (i < line.length()) {
-
-            char c = line.charAt(i);
-
-            /*
-             * Whitespace
-             */
-            if (Character.isWhitespace(c)) {
-
-                int start = i;
-
-                while (i < line.length() &&
-                        Character.isWhitespace(line.charAt(i))) {
-                    i++;
-                }
-
-                String text = line.substring(start, i);
+            if (tok.type() != TokenType.WHITESPACE) {
 
                 graphics.drawString(
                         mc.font,
-                        text,
+                        tok.text(),
                         drawX,
                         y,
-                        COLOR_NORMAL
+                        colorFor(tokens, t)
                 );
 
-                drawX += mc.font.width(text);
-                continue;
-            }
-
-
-            /*
-             * Strings
-             */
-            if (c == '"') {
-
-                int start = i;
-                i++;
-
-                while (i < line.length()) {
-
-                    if (line.charAt(i) == '"' &&
-                            (i == 0 || line.charAt(i - 1) != '\\')) {
-
-                        i++;
-                        break;
-                    }
-
-                    i++;
-                }
-
-                String word = line.substring(start, i);
-
-                int color = getIdentifierColor(
-                        line,
-                        start,
-                        i,
-                        word
-                );
-
-                graphics.drawString(
-                        mc.font,
-                        word,
-                        drawX,
-                        y,
-                        color
-                );
-
-// Ctrl + hover help underline
+                // Ctrl + hover help underline
                 if (hoveredHelpWord != null
                         && hoveredHelpWord.line() == lineIndex
-                        && hoveredHelpWord.startColumn() == start
-                        && hoveredHelpWord.endColumn() == i) {
-
-                    int wordWidth = mc.font.width(word);
+                        && hoveredHelpWord.startColumn() == tok.start()
+                        && hoveredHelpWord.endColumn() == tok.end()) {
 
                     graphics.fill(
                             drawX,
                             y + mc.font.lineHeight - 1,
-                            drawX + wordWidth,
+                            drawX + tokenWidth,
                             y + mc.font.lineHeight,
                             0xFF3399FF
                     );
                 }
-
-                drawX += mc.font.width(word);
-                continue;
             }
 
-
-            /*
-             * Comments
-             *
-             * Everything after # is gray.
-             */
-            if (c == '#') {
-
-                String text = line.substring(i);
-
-                graphics.drawString(
-                        mc.font,
-                        text,
-                        drawX,
-                        y,
-                        COLOR_COMMENT
-                );
-
-                break;
-            }
-
-
-            /*
-             * Brackets
-             */
-            if (isBracket(c)) {
-
-                String text = String.valueOf(c);
-
-                graphics.drawString(
-                        mc.font,
-                        text,
-                        drawX,
-                        y,
-                        COLOR_BRACKET
-                );
-
-                drawX += mc.font.width(text);
-                i++;
-                continue;
-            }
-
-
-            /*
-             * Numbers
-             */
-            if (Character.isDigit(c) ||
-                    (c == '.' &&
-                            i + 1 < line.length() &&
-                            Character.isDigit(line.charAt(i + 1)))) {
-
-                int start = i;
-
-                while (i < line.length()) {
-
-                    char n = line.charAt(i);
-
-                    if (!Character.isDigit(n) && n != '.') {
-                        break;
-                    }
-
-                    i++;
-                }
-
-                String text = line.substring(start, i);
-
-                graphics.drawString(
-                        mc.font,
-                        text,
-                        drawX,
-                        y,
-                        COLOR_NUMBER
-                );
-
-                drawX += mc.font.width(text);
-                continue;
-            }
-
-
-            /*
-             * Identifiers
-             *
-             * Examples:
-             *
-             * hello
-             * getPos
-             * myVariable
-             * className
-             */
-            if (Character.isLetter(c) || c == '_') {
-
-                int start = i;
-
-                while (i < line.length()) {
-
-                    char n = line.charAt(i);
-
-                    if (!Character.isLetterOrDigit(n) && n != '_') {
-                        break;
-                    }
-
-                    i++;
-                }
-
-                String word = line.substring(start, i);
-
-                int color = getIdentifierColor(line, start, i, word);
-
-                graphics.drawString(
-                        mc.font,
-                        word,
-                        drawX,
-                        y,
-                        color
-                );
-
-// Ctrl + hover help underline
-                if (hoveredHelpWord != null
-                        && hoveredHelpWord.line() == lineIndex
-                        && hoveredHelpWord.startColumn() == start
-                        && hoveredHelpWord.endColumn() == i) {
-
-                    int wordWidth = mc.font.width(word);
-
-                    graphics.fill(
-                            drawX,
-                            y + mc.font.lineHeight - 1,
-                            drawX + wordWidth,
-                            y + mc.font.lineHeight,
-                            0xFF3399FF
-                    );
-                }
-
-                drawX += mc.font.width(word);
-                continue;
-            }
-
-
-            /*
-             * Operators / punctuation
-             */
-            String text = String.valueOf(c);
-
-            graphics.drawString(
-                    mc.font,
-                    text,
-                    drawX,
-                    y,
-                    COLOR_NORMAL
-            );
-
-            drawX += mc.font.width(text);
-            i++;
+            drawX += tokenWidth;
         }
+    }
+
+    private int colorFor(List<Token> toks, int i) {
+        Token t = toks.get(i);
+
+        return switch (t.type()) {
+            case COMMENT -> COLOR_COMMENT;
+            case STRING -> COLOR_STRING;
+            case NUMBER -> COLOR_NUMBER;
+            case BRACKET -> COLOR_BRACKET;
+            case IDENT -> identifierColor(toks, i);
+            default -> COLOR_NORMAL;
+        };
+    }
+
+    private int identifierColor(List<Token> toks, int i) {
+        String word = toks.get(i).text();
+        String prev = neighbourText(toks, i, -1);
+        String next = neighbourText(toks, i, +1);
+
+        if (LanguageSpec.CONTROL_KEYWORDS.contains(word)) {
+            return COLOR_CONTROL_KEYWORD;
+        }
+
+        if (LanguageSpec.DECLARATION_KEYWORDS.contains(word)) {
+            return COLOR_DECLARATION_KEYWORD;
+        }
+
+        // class MyClass
+        if (prev.equals("class")) {
+            return COLOR_CLASS;
+        }
+
+        // def myFunction
+        if (prev.equals("def")) {
+            return COLOR_FUNCTION;
+        }
+
+        if (LanguageSpec.NATIVE_CLASSES.containsKey(word) || info.classes().containsKey(word)) {
+            return COLOR_CLASS;
+        }
+
+        if (LanguageSpec.BUILTIN_FUNCTIONS.containsKey(word) || info.functions().containsKey(word)) {
+            return COLOR_FUNCTION;
+        }
+
+        // anything followed by '(' is a call
+        if (next.equals("(")) {
+            return COLOR_FUNCTION;
+        }
+
+        return COLOR_VARIABLE;
+    }
+
+    /** Text of the nearest non-whitespace token in the given direction, or "". */
+    private static String neighbourText(List<Token> toks, int i, int dir) {
+        for (int j = i + dir; j >= 0 && j < toks.size(); j += dir) {
+            if (toks.get(j).type() != TokenType.WHITESPACE) {
+                return toks.get(j).text();
+            }
+        }
+        return "";
     }
 
     private boolean isBracket(char c) {
@@ -1870,82 +1644,6 @@ public class CodeEditorWidget extends AbstractWidget {
                 c == ']' ||
                 c == '{' ||
                 c == '}';
-    }
-
-    private int getIdentifierColor(
-            String line,
-            int start,
-            int end,
-            String word
-    ) {
-
-        // =========================================================
-        // Keywords
-        // =========================================================
-
-        if (CONTROL_KEYWORDS.contains(word)) {
-            return COLOR_CONTROL_KEYWORD;
-        }
-
-        if (DECLARATION_KEYWORDS.contains(word)) {
-            return COLOR_DECLARATION_KEYWORD;
-        }
-
-        // =========================================================
-        // Class declaration
-        //
-        // class MyClass
-        //       ^^^^^^^
-        // =========================================================
-
-        String before = line.substring(0, start).trim();
-
-        if (before.matches("class\\s*$")) {
-            return COLOR_CLASS;
-        }
-
-        // =========================================================
-        // Built-in / user classes
-        // =========================================================
-
-        if (BUILTIN_CLASSES.contains(word)) {
-            return COLOR_CLASS;
-        }
-
-        if (classes.contains(word) || nativeClasses.contains(word)) {
-            return COLOR_CLASS;
-        }
-
-        // =========================================================
-        // Functions
-        // =========================================================
-
-        if (BUILTIN_FUNCTIONS.contains(word)) {
-            return COLOR_FUNCTION;
-        }
-
-        if (functions.contains(word)) {
-            return COLOR_FUNCTION;
-        }
-
-        // Anything followed by '(' is a function call
-        int next = end;
-
-        while (next < line.length()
-                && Character.isWhitespace(line.charAt(next))) {
-            next++;
-        }
-
-        if (next < line.length()
-                && line.charAt(next) == '(') {
-            return COLOR_FUNCTION;
-        }
-
-        // =========================================================
-        // Variables
-        // =========================================================
-
-        return COLOR_VARIABLE;
     }
 
     private void ensureCursorVisible() {
@@ -2026,6 +1724,10 @@ public class CodeEditorWidget extends AbstractWidget {
         return line.substring(start, end);
     }
 
+    // =========================================================
+    // AUTOCOMPLETE
+    // =========================================================
+
     private void updateAutocomplete() {
 
         if (isInsideStringOrComment()) {
@@ -2056,7 +1758,7 @@ public class CodeEditorWidget extends AbstractWidget {
             return;
         }
 
-        // Fallback: existing normal identifier-prefix completion
+        // Fallback: normal identifier-prefix completion
         String prefix = getCurrentWord();
         autocompletePrefix = prefix;
 
@@ -2071,14 +1773,13 @@ public class CodeEditorWidget extends AbstractWidget {
         String lowerPrefix = prefix.toLowerCase();
 
         if (!isDeclarationLine) {
-            addMatching(BUILTIN_FUNCTIONS.stream().toList(), lowerPrefix);
+            addMatching(LanguageSpec.BUILTIN_FUNCTION_NAMES, lowerPrefix);
             addMatching(functions, lowerPrefix);
             addMatching(classes, lowerPrefix);
-            addMatching(nativeClasses, lowerPrefix);
+            addMatching(LanguageSpec.NATIVE_CLASS_NAMES, lowerPrefix);
         }
         addMatching(variables, lowerPrefix);
-        addMatching(CONTROL_KEYWORDS.stream().toList(), lowerPrefix);
-        addMatching(DECLARATION_KEYWORDS.stream().toList(), lowerPrefix);
+        addMatching(LanguageSpec.KEYWORD_NAMES, lowerPrefix);
 
         if (autocompleteSuggestions.isEmpty()) {
             autocompleteOpen = false;
@@ -2133,7 +1834,8 @@ public class CodeEditorWidget extends AbstractWidget {
         } else if (autocompleteMode == AutocompleteMode.METHOD
                 || (autocompleteMode == AutocompleteMode.NORMAL
                 && (functions.contains(suggestion) || classes.contains(suggestion)
-                || nativeClasses.contains(suggestion) || BUILTIN_FUNCTIONS.contains(suggestion)))) {
+                || LanguageSpec.NATIVE_CLASSES.containsKey(suggestion)
+                || LanguageSpec.BUILTIN_FUNCTIONS.containsKey(suggestion)))) {
 
             boolean alreadyHasParens = end < line.length() && line.charAt(end) == '(';
             if (!alreadyHasParens) {
@@ -2169,32 +1871,25 @@ public class CodeEditorWidget extends AbstractWidget {
         maybeAutoOutdent();
     }
 
+    /** True if the cursor is inside an (unterminated) string or inside a comment. Uses the shared lexer. */
     private boolean isInsideStringOrComment() {
 
         String line = lines.get(cursorLine);
+        List<Token> toks = Lexer.lex(line.substring(0, Math.min(cursorColumn, line.length())));
 
-        int end = Math.min(cursorColumn, line.length());
-
-        boolean insideString = false;
-
-        for (int i = 0; i < end; i++) {
-
-            char c = line.charAt(i);
-
-            // Comment
-            if (c == '#' && !insideString) {
-                return true;
-            }
-
-            // String
-            if (c == '"' &&
-                    (i == 0 || line.charAt(i - 1) != '\\')) {
-
-                insideString = !insideString;
-            }
+        if (toks.isEmpty()) {
+            return false;
         }
 
-        return insideString;
+        Token last = toks.get(toks.size() - 1);
+
+        if (last.type() == TokenType.COMMENT) {
+            return true;
+        }
+
+        // an unterminated string runs to the end of the text before the cursor
+        return last.type() == TokenType.STRING
+                && (last.text().length() == 1 || !last.text().endsWith("\""));
     }
 
     public boolean isAutocompleteOpen() {
@@ -2252,32 +1947,32 @@ public class CodeEditorWidget extends AbstractWidget {
     }
 
     /**
-     * Scans backwards from the cursor on the current line to find an unmatched
-     * '(' and returns the identifier immediately before it, or null if none.
+     * Finds the name of the call the cursor is currently inside of, e.g. "dummy" for "dummy(1, x" —
+     * or null if there is none. Uses the shared lexer, so brackets inside strings are ignored.
      */
     private String findEnclosingCallName(String line, int col) {
+        List<Token> toks = Lexer.significant(Lexer.lex(line.substring(0, Math.min(col, line.length()))));
         int depth = 0;
-        int i = col - 1;
 
-        while (i >= 0) {
-            char c = line.charAt(i);
-            if (c == ')') depth++;
-            else if (c == '(') {
+        for (int i = toks.size() - 1; i >= 0; i--) {
+            Token t = toks.get(i);
+
+            if (t.type() != TokenType.BRACKET) {
+                continue;
+            }
+
+            if (t.text().equals(")")) {
+                depth++;
+            } else if (t.text().equals("(")) {
                 if (depth == 0) {
-                    int end = i;
-                    int start = end;
-                    while (start > 0 && (Character.isLetterOrDigit(line.charAt(start - 1)) || line.charAt(start - 1) == '_')) {
-                        start--;
-                    }
-                    if (start < end) {
-                        return line.substring(start, end);
-                    }
-                    return null;
+                    return (i > 0 && toks.get(i - 1).type() == TokenType.IDENT)
+                            ? toks.get(i - 1).text()
+                            : null;
                 }
                 depth--;
             }
-            i--;
         }
+
         return null;
     }
 
@@ -2306,84 +2001,21 @@ public class CodeEditorWidget extends AbstractWidget {
         autocompleteOpen = true;
     }
 
+    /**
+     * Re-analyses the current text with the SAME analyzer the interpreter uses and
+     * refreshes everything highlighting + autocomplete depend on.
+     */
     private void rescanLocalCompletions() {
-        String fullText = String.join("\n", lines);
-        String[] programLines = fullText.split("\n", -1);
+        info = ProgramAnalyzer.analyze(getText());
 
-        Set<String> localVars = new LinkedHashSet<>(serverVariables);
-        Set<String> localFunctions = new LinkedHashSet<>(serverFunctions);
-        Set<String> localClasses = new LinkedHashSet<>(serverClasses);
-        Map<String, List<String>> localClassMethods = new LinkedHashMap<>(serverClassMethods);
-        Map<String, List<String>> localCallableParams = new LinkedHashMap<>(serverCallableParams);
-        localCallableParams.putAll(BUILTIN_FUNCTION_PARAMS);
-        localCallableParams.putAll(BUILTIN_CLASS_PARAMS);
+        Set<String> vars = new LinkedHashSet<>(extraVariables);
+        vars.addAll(info.variables());
 
-        String currentClass = null;
-
-        for (String line : programLines) {
-            String trimmed = line.trim();
-            if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
-
-            if (trimmed.startsWith("class")) {
-                String name = trimmed.substring(5).trim();
-                if (name.endsWith("()")) name = name.substring(0, name.length() - 2).trim();
-                if (!name.isEmpty()) {
-                    currentClass = name;
-                    localClasses.add(name);
-                    localClassMethods.computeIfAbsent(name, k -> new ArrayList<>());
-                }
-                continue;
-            }
-            if (trimmed.equals("endclass")) {
-                currentClass = null;
-                continue;
-            }
-
-            if (trimmed.startsWith("def")) {
-                int space = trimmed.indexOf(' ');
-                int open = trimmed.indexOf('(');
-                int close = trimmed.indexOf(')');
-                if (space != -1 && open != -1 && close != -1 && open < close) {
-                    String name = trimmed.substring(space + 1, open).trim();
-                    String argsStr = trimmed.substring(open + 1, close).trim();
-                    List<String> params = argsStr.isEmpty() ? List.of() :
-                            Arrays.stream(argsStr.split(",")).map(s -> s.trim().split("=")[0].trim())
-                                    .filter(p -> !p.equals("self")).toList();
-
-                    if (!name.isEmpty()) {
-                        if (currentClass != null) {
-                            localClassMethods.computeIfAbsent(currentClass, k -> new ArrayList<>()).add(name);
-                            if (name.equals("__init__")) {
-                                localCallableParams.put(currentClass, params); // constructor args, keyed by class name
-                            }
-                        } else {
-                            localFunctions.add(name);
-                        }
-                        localCallableParams.put(name, params);
-                        localVars.addAll(params); // see fix #3 below
-                    }
-                }
-                continue;
-            }
-
-            if (trimmed.contains("=") && !trimmed.contains("==") && !trimmed.contains("!=")
-                    && !trimmed.contains(">=") && !trimmed.contains("<=")
-                    && !trimmed.contains(".") && !trimmed.contains("[")) {
-
-                String left = trimmed.substring(0, trimmed.indexOf('=')).trim();
-                if (left.matches("^[A-Za-z_][A-Za-z0-9_]*$")) {
-                    localVars.add(left);
-                } else if (left.matches("^[A-Za-z_][A-Za-z0-9_]*(\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*)+$")) {
-                    for (String name : left.split("\\s*,\\s*")) localVars.add(name.trim());
-                }
-            }
-        }
-
-        this.variables = List.copyOf(localVars);
-        this.functions = List.copyOf(localFunctions);
-        this.classes = List.copyOf(localClasses);
-        this.classMethods = localClassMethods;
-        this.callableParams = localCallableParams;
+        this.variables = List.copyOf(vars);
+        this.functions = List.copyOf(info.functions().keySet());
+        this.classes = List.copyOf(info.classes().keySet());
+        this.classMethods = info.classMethods();
+        this.callableParams = info.callableParams();
     }
 
     private void maybeAutoOutdent() {
@@ -2400,10 +2032,8 @@ public class CodeEditorWidget extends AbstractWidget {
     }
 
 
+    /** Finds the help-able identifier under the mouse (using the shared lexer). */
     private HelpWordHit getHelpWordAt(double mouseX, double mouseY) {
-        if (!HELP_LOOKUP.containsKey("")) {
-            // no-op; keeps this method independent of rendering
-        }
 
         Minecraft mc = Minecraft.getInstance();
 
@@ -2435,64 +2065,26 @@ public class CodeEditorWidget extends AbstractWidget {
         }
 
         // Find which character the mouse is over
-        int column = 0;
+        int column = line.length();
 
         for (int i = 0; i < line.length(); i++) {
-            int charWidth = mc.font.width(line.substring(0, i + 1));
-
-            if (charWidth > relativeX) {
+            if (mc.font.width(line.substring(0, i + 1)) > relativeX) {
                 column = i;
                 break;
             }
-
-            column = i + 1;
         }
 
-        // Find identifier around the column
-        if (column > line.length()) {
-            column = line.length();
-        }
+        for (Token tok : Lexer.lex(line)) {
+            if (tok.type() == TokenType.IDENT
+                    && column >= tok.start()
+                    && column < tok.end()
+                    && HELP_LOOKUP.containsKey(tok.text())) {
 
-        int start = column;
-
-        while (start > 0) {
-            char c = line.charAt(start - 1);
-
-            if (!Character.isLetterOrDigit(c) && c != '_') {
-                break;
+                return new HelpWordHit(tok.text(), lineIndex, tok.start(), tok.end());
             }
-
-            start--;
         }
 
-        int end = column;
-
-        while (end < line.length()) {
-            char c = line.charAt(end);
-
-            if (!Character.isLetterOrDigit(c) && c != '_') {
-                break;
-            }
-
-            end++;
-        }
-
-        if (start == end) {
-            return null;
-        }
-
-        String word = line.substring(start, end);
-
-        if (!HELP_LOOKUP.containsKey(word)) {
-            return null;
-        }
-
-        return new HelpWordHit(
-                word,
-                lineIndex,
-                start,
-                end
-        );
+        return null;
     }
 
     private void drawScrollbars(GuiGraphics guiGraphics) {

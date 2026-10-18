@@ -47,10 +47,7 @@ public class AeroComputersClient {
 
     @SubscribeEvent
     static void onClientSetup(FMLClientSetupEvent event) {
-        // Some client setup code
-        AeroComputers.LOGGER.info("HELLO FROM CLIENT SETUP");
-        AeroComputers.LOGGER.info("MINECRAFT NAME >> {}", Minecraft.getInstance().getUser().getName());
-
+        AeroComputers.LOGGER.info("Initializing AeroComputers Client");
     }
 
     @SubscribeEvent
